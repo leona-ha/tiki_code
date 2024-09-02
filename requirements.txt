@@ -228,6 +228,7 @@ pep8==1.7.1
 pexpect @ file:///tmp/build/80754af9/pexpect_1605563209008/work
 pickleshare @ file:///tmp/build/80754af9/pickleshare_1606932040724/work
 Pillow @ file:///private/var/folders/sy/f16zz6x50xz3113nwtb9bvq00000gp/T/abs_124pvldps5/croot/pillow_1695134106500/work
+pip==23.2.1
 pipreqs==0.5.0
 pipreqsnb==0.2.4
 pkce @ file:///private/var/folders/c_/qfmhj66j0tn016nkx_th4hxm0000gp/T/abs_afkgd9bupa/croot/pkce_1690384838211/work
@@ -321,8 +322,11 @@ seaborn @ file:///Users/ec2-user/ci_py311/seaborn_1678394152964/work
 semantic-version==2.10.0
 Send2Trash @ file:///tmp/build/80754af9/send2trash_1632406701022/work
 service-identity @ file:///Users/ktietz/demo/mc3/conda-bld/service_identity_1629460757137/work
+setuptools==68.0.0
+shap==0.46.0
 sip @ file:///Users/ec2-user/ci_py311/sip_1678318421743/work
 six @ file:///tmp/build/80754af9/six_1644875935023/work
+slicer==0.0.8
 smart-open @ file:///Users/ec2-user/ci_py311/smart_open_1678389689993/work
 sniffio @ file:///Users/ec2-user/ci_py311/sniffio_1678317345022/work
 snowballstemmer @ file:///tmp/build/80754af9/snowballstemmer_1637937080595/work
@@ -377,6 +381,7 @@ webencodings==0.5.1
 websocket-client @ file:///Users/ec2-user/ci_py311/websocket-client_1678317758506/work
 Werkzeug @ file:///private/var/folders/sy/f16zz6x50xz3113nwtb9bvq00000gp/T/abs_fegt3z60s3/croot/werkzeug_1679489762631/work
 whatthepatch @ file:///Users/ec2-user/ci_py311/whatthepatch_1678379478749/work
+wheel==0.38.4
 widgetsnbextension @ file:///private/var/folders/sy/f16zz6x50xz3113nwtb9bvq00000gp/T/abs_8feupjw2ld/croot/widgetsnbextension_1679313870305/work
 wordcloud==1.9.3
 wrapt @ file:///Users/ec2-user/ci_py311/wrapt_1678323111850/work
