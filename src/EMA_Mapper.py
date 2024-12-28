@@ -355,7 +355,7 @@ class SensorDataMapper:
         return self.df_ema
     
 
-    def map_heart_rate_to_ema(self, compute_stats=True, batch_size=5000):
+    def map_heart_rate_to_ema(self, compute_stats=True, batch_size=1000):
         """
         Map heart rate data to EMA blocks and compute statistics using batch processing.
     
@@ -450,7 +450,7 @@ class SensorDataMapper:
         return self.df_ema
 
 
-    def map_gps_and_transition_to_ema(self, batch_size=5000):
+    def map_gps_and_transition_to_ema(self, batch_size=1000):
         """
         Map GPS and transition data to EMA blocks using batch processing,
         including `n_GPS`, `at_home_minute`, and `total_distance_km`.
@@ -553,7 +553,7 @@ class SensorDataMapper:
         return self.df_ema
 
 
-    def map_steps_and_metrics_to_ema(self, batch_size=5000):
+    def map_steps_and_metrics_to_ema(self, batch_size=1000):
         """
         Map steps, calories, and distance data to EMA blocks using batch processing.
     
@@ -635,7 +635,7 @@ class SensorDataMapper:
         return self.df_ema
 
             
-    def map_activity_types_to_ema(self, batch_size=5000):
+    def map_activity_types_to_ema(self, batch_size=1000):
         """
         Map ActivityType occurrences and durations (in minutes) to EMA blocks.
         """
