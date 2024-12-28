@@ -736,9 +736,3 @@ class SensorDataMapper:
             print("No valid ActivityType overlaps found. Assigned -1 to all activity columns.")
     
         return self.df_ema
-
-
-
-
-
-
