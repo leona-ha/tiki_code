@@ -60,61 +60,49 @@ class DataCleaner:
     def clean_heart_rate_data(self, df_hr):
         """
         Clean heart rate data by removing unrealistic values and artifacts.
-    
-        Parameters:
-            df_hr (pd.DataFrame): Raw heart rate data.
-    
-        Returns:
-            pd.DataFrame: Cleaned heart rate data.
         """
         df_hr = df_hr.copy()
-        columns_to_keep = ['startTimestamp', 'longValue', 'customer']
-        df_hr = df_hr[columns_to_keep].copy()
+        
+        # List all columns you want to keep. If your raw data has 'endTimestamp',
+        # include it here:
+        columns_to_keep = ['startTimestamp', 'endTimestamp', 'longValue', 'customer']
+        
+        # If your raw data might not always have 'endTimestamp', do a set intersection:
+        existing_cols = list(set(df_hr.columns).intersection(columns_to_keep))
+        df_hr = df_hr[existing_cols].copy()
+        
         initial_count = len(df_hr)
-    
-        # Step 1: Convert to numeric and drop NaNs
+        
+        # Step 1: Convert to numeric and drop NaNs for 'longValue'
         df_hr['longValue'] = pd.to_numeric(df_hr['longValue'], errors='coerce')
         df_hr = df_hr.dropna(subset=['longValue'])
         after_numeric_conversion = len(df_hr)
         na_removed = initial_count - after_numeric_conversion
-    
+        
         # Step 2: Apply physiological thresholds
         min_hr_threshold = 30
         max_hr_threshold = 220
-        df_hr = df_hr[(df_hr['longValue'] >= min_hr_threshold) & (df_hr['longValue'] <= max_hr_threshold)]
+        df_hr = df_hr[
+            (df_hr['longValue'] >= min_hr_threshold) &
+            (df_hr['longValue'] <= max_hr_threshold)
+        ]
         after_thresholds = len(df_hr)
         thresholds_removed = after_numeric_conversion - after_thresholds
-    
-        # Step 3: Sort by timestamp
+        
+        # Step 3: Sort by 'startTimestamp' (and optionally 'endTimestamp')
         df_hr = df_hr.sort_values('startTimestamp')
-    
-        # Step 4: Apply smoothing before calculating change rate
-        window_size = 5
-        df_hr['longValue_smoothed'] = df_hr['longValue'].rolling(window=window_size, min_periods=1).mean()
-    
-        # Step 5: Calculate change rate with smoothed data
-        df_hr['time_diff'] = df_hr['startTimestamp'].diff().dt.total_seconds().fillna(0)
-        df_hr['hr_diff'] = df_hr['longValue_smoothed'].diff().fillna(0)
-        df_hr['hr_change_rate'] = df_hr['hr_diff'] / df_hr['time_diff'].replace(0, np.nan)
-    
-        # Step 6: Adjust maximum change rate threshold
-        max_change_rate = 30
-        df_hr = df_hr[df_hr['hr_change_rate'].abs() <= max_change_rate]
+        
+        # Summarize
         final_count = len(df_hr)
-        change_rate_removed = after_thresholds - final_count
-    
-        # Summarize entries removed
         total_removed = initial_count - final_count
         print(f"Heart Rate Data Cleaning Summary:")
         print(f"Initial entries: {initial_count}")
         print(f"Removed due to non-numeric values: {na_removed}")
         print(f"Removed due to thresholds: {thresholds_removed}")
-        print(f"Removed due to exceeding change rate threshold: {change_rate_removed}")
         print(f"Total entries removed: {total_removed}")
         print(f"Remaining entries: {final_count}")
-    
+        
         return df_hr
-
 
 
     def clean_step_data(self, df_steps):
@@ -368,39 +356,51 @@ class SensorDataMapper:
             pd.DataFrame: The updated EMA DataFrame with heart rate metrics.
         """
     
-        # Clean heart rate data
+        # 1. Clean / filter heart rate data
         df_hr_cleaned = self.data_cleaner.clean_heart_rate_data(
             self.df_data[self.df_data['type'] == 'HeartRate']
         )
+        
+        # If you have both 'startTimestamp' and 'endTimestamp' for heart-rate intervals,
+        # ensure they are datetimes:
+        df_hr_cleaned['startTimestamp'] = pd.to_datetime(df_hr_cleaned['startTimestamp'])
+        df_hr_cleaned['endTimestamp'] = pd.to_datetime(df_hr_cleaned['endTimestamp'])
     
         # Filter HR data by the overall time range of EMA blocks
         min_time = self.df_ema['sensor_block_start'].min()
         max_time = self.df_ema['sensor_block_end'].max()
         df_hr_cleaned = df_hr_cleaned[
-            (df_hr_cleaned['startTimestamp'] >= min_time) &
-            (df_hr_cleaned['startTimestamp'] <= max_time)
+            (df_hr_cleaned['startTimestamp'] <= max_time) &
+            (df_hr_cleaned['endTimestamp'] >= min_time)
         ]
+        # Note: We filter by overlapping intervals rather than just startTimestamp
     
-        # Break EMA blocks into batches
+        # 2. Break EMA blocks into batches
         num_batches = (len(self.df_ema) // batch_size) + 1
         results = []
     
         for i in range(num_batches):
-            ema_batch = self.df_ema.iloc[i * batch_size: (i + 1) * batch_size]
+            ema_batch = self.df_ema.iloc[i * batch_size : (i + 1) * batch_size]
     
-            # Merge and filter for overlaps
+            # Merge on participant; 'inner' keeps only matching customers
             df_joined = ema_batch.merge(df_hr_cleaned, on='customer', how='inner')
+    
+            # Now filter for any possible overlap between HR intervals and the EMA block
+            # Because the HR intervals have start/end, we say:
+            # (end of HR interval >= start of block) AND (start of HR interval <= end of block)
             df_joined = df_joined[
-                (df_joined['startTimestamp'] >= df_joined['sensor_block_start']) &
+                (df_joined['endTimestamp'] >= df_joined['sensor_block_start']) &
                 (df_joined['startTimestamp'] <= df_joined['sensor_block_end'])
             ]
-    
+            
             if not df_joined.empty:
                 if compute_stats:
+                    # ---------- DETAILED FEATURE CALCULATION ----------
                     def calculate_features(group):
-                        values = group['longValue'].values
-                        timestamps = group['startTimestamp'].astype(np.int64) / 1e9  # Convert to seconds
+                        """Compute statistical and zone-based features for each EMA block."""
     
+                        # 1) Basic stats on the entire set of HR values in this group
+                        values = group['longValue'].values
                         features = {
                             'hr_mean': values.mean(),
                             'hr_min': values.min(),
@@ -412,41 +412,93 @@ class SensorDataMapper:
                             'skewness_heartrate': pd.Series(values).skew(),
                             'kurtosis_heartrate': pd.Series(values).kurtosis(),
                             'hr_peak_counts': np.sum(values > 100),  # Example threshold
-                            'hr_slope': np.polyfit(timestamps, values, 1)[0] if len(values) > 1 else 0,
                         }
     
-                        # Calculate time in HR zones
-                        group['duration'] = group['startTimestamp'].diff().dt.total_seconds().fillna(0)
-                        total_duration = group['duration'].sum()
-                        features.update({
-                            'hr_zone_resting': group[group['longValue'] < 60]['duration'].sum() / total_duration if total_duration > 0 else -1,
-                            'hr_zone_moderate': group[(group['longValue'] >= 60) & (group['longValue'] < 100)]['duration'].sum() / total_duration if total_duration > 0 else -1,
-                            'hr_zone_vigorous': group[group['longValue'] >= 100]['duration'].sum() / total_duration if total_duration > 0 else -1,
-                        })
+                        # 2) Compute the overlap-based zone durations
+                        block_start = group['sensor_block_start'].iloc[0]
+                        block_end   = group['sensor_block_end'].iloc[0]
+                        block_duration = (block_end - block_start).total_seconds()
+    
+                        # Initialize zone counters (in seconds)
+                        resting_sec = 0.0
+                        moderate_sec = 0.0
+                        vigorous_sec = 0.0
+    
+                        for idx, row in group.iterrows():
+                            # Heart-rate interval
+                            hr_start = row['startTimestamp']
+                            hr_end   = row['endTimestamp']
+    
+                            # Overlap with EMA block
+                            overlap_start = max(hr_start, block_start)
+                            overlap_end   = min(hr_end, block_end)
+                            overlap_duration = (overlap_end - overlap_start).total_seconds()
+    
+                            # If there's a valid overlap
+                            if overlap_duration > 0:
+                                # Classify by HR value
+                                hr_val = row['longValue']
+                                if hr_val < 60:
+                                    resting_sec += overlap_duration
+                                elif hr_val < 100:
+                                    moderate_sec += overlap_duration
+                                else:
+                                    vigorous_sec += overlap_duration
+    
+                        # 3) Convert total durations to proportions of the entire block
+                        if block_duration > 0:
+                            features.update({
+                                'hr_zone_resting': resting_sec / block_duration,
+                                'hr_zone_moderate': moderate_sec / block_duration,
+                                'hr_zone_vigorous': vigorous_sec / block_duration,
+                            })
+                        else:
+                            # If block_duration is zero (unlikely), set zones to 0
+                            features.update({
+                                'hr_zone_resting': 0,
+                                'hr_zone_moderate': 0,
+                                'hr_zone_vigorous': 0,
+                            })
     
                         return pd.Series(features)
     
-                    # Compute features for this batch
                     hr_features = df_joined.groupby('unique_blocks').apply(calculate_features).reset_index()
+    
                 else:
-                    # Compute average HR only
-                    hr_features = df_joined.groupby('unique_blocks')['longValue'].mean().reset_index()
+                    # ---------- SIMPLE AVERAGE HEART RATE ----------
+                    # For the simpler path, just compute the average 'longValue' in each block
+                    # ignoring intervals (or adapt if you want interval weighting)
+                    hr_features = (
+                        df_joined
+                        .groupby('unique_blocks')['longValue']
+                        .mean()
+                        .reset_index()
+                    )
                     hr_features.rename(columns={'longValue': 'avg_heartrate'}, inplace=True)
     
                 results.append(hr_features)
     
-        # Combine results from all batches
+        # 3. Combine results from all batches
         if results:
             final_features = pd.concat(results, ignore_index=True)
             self.df_ema = pd.merge(self.df_ema, final_features, on='unique_blocks', how='left')
         else:
+            # If no heart-rate data matched any EMA block, fill columns with -1
             if compute_stats:
-                self.df_ema[['hr_mean', 'hr_min', 'hr_max', 'hr_std', 'hr_median', 'range_heartrate',
-                             'iqr_heartrate', 'skewness_heartrate', 'kurtosis_heartrate', 'hr_peak_counts',
-                             'hr_zone_resting', 'hr_zone_moderate', 'hr_zone_vigorous', 'hr_slope']] = -1
+                self.df_ema[
+                    [
+                        'hr_mean', 'hr_min', 'hr_max', 'hr_std', 'hr_median',
+                        'range_heartrate', 'iqr_heartrate',
+                        'skewness_heartrate', 'kurtosis_heartrate',
+                        'hr_peak_counts', 'hr_zone_resting',
+                        'hr_zone_moderate', 'hr_zone_vigorous'
+                    ]
+                ] = -1
             else:
                 self.df_ema['avg_heartrate'] = -1
     
+        return self.df_ema
+
         return self.df_ema
 
 
