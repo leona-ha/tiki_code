@@ -7,16 +7,10 @@ import sys
 import argparse
 import importlib
 from os.path import join
-from glob import glob
 from datetime import datetime
-from copy import deepcopy
-from joblib import Parallel, delayed, dump
-
-import numpy as np
 import pandas as pd
-import pickle
 import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning) 
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Local imports
 from ML_pipeline import MLpipeline
@@ -42,7 +36,7 @@ def main():
     # 3. Set output directory based on config path
     OUTPUT_DIR = cfg_path.replace('ML_Config.py', 'results')
     if runDEBUG:
-        print("="*40 + "\nRunning DEBUG MODE\n" + "="*40)
+        print("=" * 40 + "\nRunning DEBUG MODE\n" + "=" * 40)
         cfg.N_INNER_CV = 2
         cfg.HOLDOUT_RATIO = 0.1
         cfg.TIME_RATIO = 0.8
@@ -62,27 +56,56 @@ def main():
         cpy_cfg = join(SAVE_DIR, f'ML_Config_{start_time.strftime("%Y%m%d_%H%M")}.py')
         os.system(f"cp {cfg_path} {cpy_cfg}")
 
-        # 5. Create an instance of MLpipeline and run splits
+        # 5. Create an instance of MLpipeline and load data
         mlp = MLpipeline(config=cfg, random_state=42)
-        mlp.load_data(pkl_file)
+
+        # Load the data from .pkl and set to pipeline
+        try:
+            with open(pkl_file, 'rb') as f:
+                df = pickle.load(f)
+            mlp.set_data(df)
+        except Exception as e:
+            print(f"Error loading data from {pkl_file}: {e}")
+            continue
+
+        # 6. Perform outer and inner splits
         mlp.outer_user_split()
         mlp.inner_time_split()
 
-        # 6. Select the model pipeline/grid combos (for regression in this example)
+        # 7. Select the model pipeline/grid combos (for regression in this example)
         pipeline_grid_tuples = cfg.ANALYSIS["neg_affect_regression"]["MODEL_PIPEGRIDS"]
         scoring = cfg.ANALYSIS["neg_affect_regression"]["METRICS"]
         task_type = cfg.ANALYSIS["neg_affect_regression"]["TASK_TYPE"]
 
-        # 7. Run the pipeline (on inner splits and evaluate on holdout)
-        results = mlp.run(pipeline_grid_tuples=pipeline_grid_tuples, task_type=task_type, scoring=scoring)
-        print("Final Results:", results)
+        # 8. Run the pipeline on inner splits
+        try:
+            results_timebased = mlp.run(pipeline_grid_dict=pipeline_grid_tuples,
+                                        task_type=task_type, scoring=scoring)
+        except Exception as e:
+            print(f"Error running pipelines on inner splits: {e}")
+            continue
 
-        # 8. Save or consolidate results (e.g., into CSV)
-        run_csv_path = join(SAVE_DIR, "run_results.csv")
-        df_results = pd.DataFrame(results)
-        df_results.to_csv(run_csv_path, index=False)
+        # 9. Evaluate on holdout set
+        try:
+            results_holdout = mlp.evaluate_holdout_all(results_timebased)
+        except Exception as e:
+            print(f"Error during holdout evaluation: {e}")
+            results_holdout = []
+
+        # 10. Save or consolidate results (e.g., into CSV)
+        try:
+            df_results_timebased = pd.DataFrame(results_timebased)
+            df_results_timebased.to_csv(join(SAVE_DIR, "timebased_results.csv"), index=False)
+
+            if results_holdout:
+                df_results_holdout = pd.DataFrame(results_holdout)
+                df_results_holdout.to_csv(join(SAVE_DIR, "holdout_results.csv"), index=False)
+        except Exception as e:
+            print(f"Error saving results: {e}")
+
         total_runtime = str(datetime.now() - start_time).split(".")[0]
-        print(f'TOTAL RUNTIME: {total_runtime} secs')
+        print(f"TOTAL RUNTIME: {total_runtime} secs")
 
 if __name__ == "__main__":
     sys.exit(main())
+
