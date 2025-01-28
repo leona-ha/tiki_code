@@ -25,7 +25,6 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
         rf__n_estimators=300,  # new param to tune the random forest
         cluster_col_idx=-1,
         z_start_col=-2,
-        q_cols=1
     ):
         """
         Parameters
@@ -40,15 +39,14 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
             Column index in X that contains cluster IDs.
         z_start_col : int
             The start column index in X for Z features.
-        q_cols : int
-            How many columns in X belong to Z.
+
         """
         self.gll_early_stop_threshold = gll_early_stop_threshold
         self.max_iterations = max_iterations
         self.rf__n_estimators = rf__n_estimators
         self.cluster_col_idx = cluster_col_idx
         self.z_start_col = z_start_col
-        self.q_cols = q_cols
+
 
         fe_model = RandomForestRegressor(n_estimators=self.rf__n_estimators, n_jobs=-1)
         self.merf_model = MERF(
@@ -71,39 +69,37 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
             clusters_series = pd.Series(clusters_series.values, index=X.index)
 
         # 2) Extract Z features
-        z_end_col = self.z_start_col + self.q_cols
-        Z_part = X.iloc[:, self.z_start_col : z_end_col]
+        Z_part = X.iloc[:, [self.z_start_col]]
 
         # 3) Extract fixed-effect columns => exclude cluster col + Z columns
         fixed_cols_mask = np.ones(X.shape[1], dtype=bool)
         fixed_cols_mask[self.cluster_col_idx] = False
-        fixed_cols_mask[self.z_start_col:z_end_col] = False
+        fixed_cols_mask[self.z_start_col] = False
         X_fixed = X.loc[:, fixed_cols_mask]
 
         # Fit MERF
         self.merf_model.fit(X_fixed.values, Z_part.values, clusters_series, np.array(y))
         return self
-
+        
     def predict(self, X):
-        """
-        For predicting, we slice out [Z, cluster], feed them to MERF's .predict(...).
-        """
-        if not isinstance(X, pd.DataFrame):
-            X = pd.DataFrame(X)
-
-        clusters_series = X.iloc[:, self.cluster_col_idx]
-        if not isinstance(clusters_series, pd.Series):
-            clusters_series = pd.Series(clusters_series.values, index=X.index)
-
-        z_end_col = self.z_start_col + self.q_cols
-        Z_part = X.iloc[:, self.z_start_col : z_end_col]
-
-        fixed_cols_mask = np.ones(X.shape[1], dtype=bool)
-        fixed_cols_mask[self.cluster_col_idx] = False
-        fixed_cols_mask[self.z_start_col:z_end_col] = False
-        X_fixed = X.loc[:, fixed_cols_mask]
-
-        return self.merf_model.predict(X_fixed.values, Z_part.values, clusters_series)
+            """
+            For predicting, we slice out [Z, cluster], feed them to MERF's .predict(...).
+            """
+            if not isinstance(X, pd.DataFrame):
+                X = pd.DataFrame(X)
+    
+            clusters_series = X.iloc[:, self.cluster_col_idx]
+            if not isinstance(clusters_series, pd.Series):
+                clusters_series = pd.Series(clusters_series.values, index=X.index)
+            # 2) Extract Z features
+            Z_part = X.iloc[:, [self.z_start_col]]
+    
+            fixed_cols_mask = np.ones(X.shape[1], dtype=bool)
+            fixed_cols_mask[self.cluster_col_idx] = False
+            fixed_cols_mask[self.z_start_col] = False
+            X_fixed = X.loc[:, fixed_cols_mask]
+    
+            return self.merf_model.predict(X_fixed.values, Z_part.values, clusters_series)
 
     def get_params(self, deep=True):
         """Exposing hyperparameters for scikit-learn's GridSearchCV."""
@@ -113,7 +109,6 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
             "rf__n_estimators": self.rf__n_estimators,
             "cluster_col_idx": self.cluster_col_idx,
             "z_start_col": self.z_start_col,
-            "q_cols": self.q_cols,
         }
 
     def set_params(self, **params):
@@ -133,6 +128,4 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
                 gll_early_stop_threshold=self.gll_early_stop_threshold,
                 max_iterations=self.max_iterations
             )
-        return self
-
-
+        return self       

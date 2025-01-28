@@ -103,8 +103,8 @@ Regression_model_settings = {
             ))
         ]),
         {
-            "model_MERF__regressor__max_iterations": [10],
-            "model_MERF__regressor__rf__n_estimators": [50],  # Tunable RF param
+            "model_MERF__regressor__max_iterations": [10, 15],
+            "model_MERF__regressor__rf__n_estimators": [50,100],  # Tunable RF param
         }
     ),
     
@@ -122,8 +122,8 @@ Regression_model_settings = {
             ))
         ]),
         {
-            "model_MERF__regressor__max_iterations": [10],
-            "model_MERF__regressor__rf__n_estimators": [50]
+            "model_MERF__regressor__max_iterations": [10, 15],
+            "model_MERF__regressor__rf__n_estimators": [50, 100]
         }
 
     ),

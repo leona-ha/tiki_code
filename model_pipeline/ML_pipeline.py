@@ -425,9 +425,7 @@ class MLpipeline:
     
         # 1) Create the cross-validator on df_inner_train
         try:
-            self.logger.debug("Attempting to create forward-chaining cross-validator.")
             cv, train_df = self.create_forwardchaining_cv()
-            self.logger.info("[run_grid_search] Cross-validator and inner training data obtained.")
         except Exception as e:
             self.logger.error("Error creating cross-validator:")
             self.logger.error(e)
@@ -441,83 +439,68 @@ class MLpipeline:
             feature_cols = self._get_feature_cols(pipeline_name)
             self.logger.debug(f"[{pipeline_name}] Feature columns selected: {feature_cols}")
     
-            try:
-                X_train = train_df[feature_cols].copy()  # Copy to avoid modifying the original
-                y_train = train_df[self.cfg.LABEL_COL]
-                
-         # For MERF pipelines, extract cluster and intercept columns
-                if "MERF" in pipeline_name:
-                    clusters_train = LabelEncoder().fit_transform(train_df[self.cfg.USER_COL])
-                    intercept_train = np.ones(X_train.shape[0])
-                    # Remove 'customer' and 'intercept' from X_train features
-                    X_train = X_train.drop(columns=[self.cfg.USER_COL, "intercept"], errors="ignore")
-
+            X_train = train_df[feature_cols].copy()  # Copy to avoid modifying the original
+            y_train = train_df[self.cfg.LABEL_COL]
+                    
+            # Handle MERF-specific features
+            if "MERF" in pipeline_name:
+                label_encoder = LabelEncoder()
+                clusters_train = label_encoder.fit_transform(train_df[self.cfg.USER_COL])
+                intercept_train = np.ones(X_train.shape[0])
+                X_train["cluster"] = clusters_train
+                X_train["intercept"] = intercept_train
     
-            # Extract group labels (user IDs) for cross-validation
+    
             try:
                 groups = train_df[self.cfg.USER_COL]
                 self.logger.debug(f"[{pipeline_name}] Group labels extracted for cross-validation.")
             except KeyError as e:
                 self.logger.error(f"[{pipeline_name}] Group column not found: {e}")
-                continue  # Skip to the next pipeline
+                continue
     
-            # Build preprocessor
-            try:
-                preprocessor = self.build_preprocessor(feature_cols, pipeline_name=pipeline_name)
-                self.logger.debug(f"[{pipeline_name}] Preprocessor built successfully.")
-            except Exception as e:
-                self.logger.error(f"[{pipeline_name}] Error building preprocessor: {e}")
-                continue  # Skip to the next pipeline
+            preprocessor = self.build_preprocessor(feature_cols, pipeline_name=pipeline_name)
+            combined_pipeline = Pipeline([("preprocessor", preprocessor)] + list(raw_pipeline.steps))
+
     
-            # Combine preprocessor with the raw pipeline steps
-            try:
-                combined_pipeline = Pipeline([
-                    ("preprocessor", preprocessor)
-                ] + list(raw_pipeline.steps))
-                self.logger.debug(f"[{pipeline_name}] Combined pipeline created.")
-            except Exception as e:
-                self.logger.error(f"[{pipeline_name}] Error combining pipeline steps: {e}")
-                continue  # Skip to the next pipeline
-    
-            # Initialize GridSearchCV
             self.logger.debug(f"[{pipeline_name}] Starting GridSearchCV (forward-chaining)...")
             gs = GridSearchCV(
                 estimator=combined_pipeline,
                 param_grid=param_grid,
                 scoring=scoring,
                 refit=refit,
-                cv=cv,  # PerUserForwardChainingCV instance
+                cv=cv,
                 n_jobs=self.cfg.N_JOBS,
-                error_score='raise'  # Ensure errors are raised
+                error_score='raise'
             )
     
-            # Fit GridSearchCV with groups
             try:
                 self.logger.info(f"[{pipeline_name}] Fitting GridSearchCV.")
-                self.logger.info(f"[{pipeline_name}] Columns in training data: {X_train.columns if isinstance(X_train, pd.DataFrame) else 'Not a DataFrame'}")
-                self.logger.info(f"[{pipeline_name}] USER_COL: {self.cfg.USER_COL} included in feature_cols: {self.cfg.USER_COL in feature_cols}")
-
                 gs.fit(X_train, y_train, groups=groups)
                 self.logger.info(f"[{pipeline_name}] GridSearchCV completed.")
                 self.logger.info(f"[{pipeline_name}] Best Parameters: {gs.best_params_}")
                 self.logger.info(f"[{pipeline_name}] Best CV Score ({refit}): {gs.best_score_:.3f}")
             except ValueError as e:
                 self.logger.error(f"[ERROR] GridSearchCV failed for pipeline {pipeline_name}: {e}")
-                continue  # Skip to the next pipeline
+                continue
             except Exception as e:
                 self.logger.error(f"[ERROR] Unexpected error during GridSearchCV for pipeline {pipeline_name}: {e}")
-                continue  # Skip to the next pipeline
+                continue
     
-            # Define X_inner_test and y_inner_test within the loop
             try:
-                X_inner_test = self.df_inner_test[feature_cols]
+                X_inner_test = self.df_inner_test[feature_cols].copy()
                 y_inner_test = self.df_inner_test[self.cfg.LABEL_COL]
-                self.logger.debug(f"[{pipeline_name}] Inner test set prepared: X_inner_test shape = {X_inner_test.shape}")
+    
+                if "MERF" in pipeline_name:
+                    clusters_inner_test = label_encoder.transform(self.df_inner_test[self.cfg.USER_COL])
+                    intercept_inner_test = np.ones(X_inner_test.shape[0])
+                    X_inner_test["cluster"] = clusters_inner_test
+                    X_inner_test["intercept"] = intercept_inner_test
+    
+                self.logger.debug(f"[{pipeline_name}] Inner test set prepared.")
             except KeyError as e:
                 self.logger.error(f"[{pipeline_name}] Inner test set preparation failed: {e}")
-                continue  # Skip to the next pipeline
+                continue
     
-            # Make predictions on inner test set
             try:
                 self.logger.debug(f"[{pipeline_name}] Making predictions on inner test set.")
                 test_predictions = gs.predict(X_inner_test)
@@ -525,9 +508,8 @@ class MLpipeline:
             except Exception as e:
                 self.logger.error(f"[{pipeline_name}] Error during prediction on inner test set:")
                 self.logger.error(e)
-                continue  # Skip to the next pipeline
+                continue
     
-            # Evaluate test set metrics
             try:
                 test_scores = {
                     "r2": r2_score(y_inner_test, test_predictions),
@@ -538,44 +520,13 @@ class MLpipeline:
             except Exception as e:
                 self.logger.error(f"[{pipeline_name}] Error during evaluation of inner test set:")
                 self.logger.error(e)
-                continue  # Skip to the next pipeline
+                continue
     
-            # Optional final refit
-            if do_final_refit:
-                self.logger.debug(f"[{pipeline_name}] Re-fitting on (inner_train + inner_test) to maximize data usage...")
-                try:
-                    X_full = pd.concat([X_train, X_inner_test], axis=0)
-                    y_full = pd.concat([y_train, y_inner_test], axis=0)
-                    self.logger.debug(f"[{pipeline_name}] Full training data prepared: X_full shape = {X_full.shape}")
-                except Exception as e:
-                    self.logger.error(f"[{pipeline_name}] Error during concatenation for final refit:")
-                    self.logger.error(e)
-                    continue  # Skip to the next pipeline
-    
-                # Rebuild the pipeline with the best parameters
-                final_pipeline = Pipeline([
-                    ("preprocessor", preprocessor)
-                ] + list(raw_pipeline.steps))
-                final_pipeline.set_params(**gs.best_params_)
-                try:
-                    self.logger.debug(f"[{pipeline_name}] Fitting final pipeline on full data.")
-                    final_pipeline.fit(X_full, y_full)
-                    self.logger.info(f"[{pipeline_name}] Final refit completed.")
-                except Exception as e:
-                    self.logger.error(f"[{pipeline_name}] Final refit failed:")
-                    self.logger.error(e)
-                    continue  # Skip to the next pipeline
-    
-                final_model = final_pipeline
-            else:
-                final_model = gs.best_estimator_
-    
-            # Append results
             results_timebased.append({
                 "pipeline_name": pipeline_name,
                 "best_cv_score": gs.best_score_,
                 "inner_test_scores": test_scores,
-                "best_estimator": final_model,
+                "best_estimator": gs.best_estimator_,
             })
     
         self.logger.info("[run] ML pipeline run method completed.")
