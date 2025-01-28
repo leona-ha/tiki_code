@@ -1,60 +1,165 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GridSearchCV, PredefinedSplit
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, OneHotEncoder, FunctionTransformer
-from sklearn.feature_selection import VarianceThreshold
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, OneHotEncoder, FunctionTransformer,OrdinalEncoder, LabelEncoder
 from sklearn.impute import SimpleImputer, KNNImputer
-from sklearn.experimental import enable_iterative_imputer  # noqa
-from sklearn.impute import IterativeImputer
 from sklearn.metrics import make_scorer, r2_score, mean_absolute_error, mean_squared_error
+from sklearn.model_selection import BaseCrossValidator
+import logging
+import sys
 
-def mae_scorer(estimator, X, y_true):
-    """
-    Custom MAE scorer that supports additional parameters for MERF.
-    """
-    Z = getattr(estimator, "Z_", None)
-    clusters = getattr(estimator, "clusters_", None)
-    if Z is None or clusters is None:
-        raise ValueError("Custom scorer: 'Z_' or 'clusters_' not set in the estimator.")
-    y_pred = estimator.predict(X, Z=Z, clusters=clusters)
+
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, FunctionTransformer
+from sklearn.impute import SimpleImputer, KNNImputer
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+# Configure logging for the module
+logging.basicConfig(
+    level=logging.DEBUG,  # Capture all logs; adjust as needed
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("MLpipelineConfig")
+
+
+##############################################################################
+# CUSTOM SCORERS FOR MERF (if needed)
+##############################################################################
+
+
+def mae_scorer(y_true, y_pred):
+    """Return negative MAE (so higher is better, but we actually want lower MAE)."""
     return -mean_absolute_error(y_true, y_pred)
 
 
-def rmse_scorer(estimator, X, y_true):
-    """
-    Custom RMSE scorer that supports additional parameters for MERF.
-    """
-    Z = getattr(estimator, "Z_", None)
-    clusters = getattr(estimator, "clusters_", None)
-    if Z is None or clusters is None:
-        raise ValueError("Custom scorer: 'Z_' or 'clusters_' not set in the estimator.")
-    y_pred = estimator.predict(X, Z=Z, clusters=clusters)
+def rmse_scorer(y_true, y_pred):
+    """Return negative RMSE."""
     return -np.sqrt(mean_squared_error(y_true, y_pred))
 
 
-def r2_scorer(estimator, X, y_true):
-    """
-    Custom R2 scorer that supports additional parameters for MERF.
-    """
-    Z = getattr(estimator, "Z_", None)
-    clusters = getattr(estimator, "clusters_", None)
-    if Z is None or clusters is None:
-        raise ValueError("Custom scorer: 'Z_' or 'clusters_' not set in the estimator.")
-    y_pred = estimator.predict(X, Z=Z, clusters=clusters)
+def r2_custom_scorer(y_true, y_pred):
+    """Return R^2 as is (higher is better)."""
     return r2_score(y_true, y_pred)
 
 
-# Define custom scorers for GridSearchCV
 custom_scorers = {
     "mae": make_scorer(mae_scorer, greater_is_better=False),
     "rmse": make_scorer(rmse_scorer, greater_is_better=False),
-    "r2": make_scorer(r2_scorer, greater_is_better=True),
+    "r2": make_scorer(r2_custom_scorer, greater_is_better=True),
 }
 
 
-# ML Pipeline
+##############################################################################
+# FORWARD CHAINING CROSS-VALIDATOR
+##############################################################################
+from sklearn.model_selection import BaseCrossValidator
+
+
+class PerUserForwardChainingCV(BaseCrossValidator):
+    """
+    A custom cross-validator for user-level time series.
+    Skips the first fold (fold 0) to avoid an empty training set.
+    Yields n_splits - 1 splits.
+
+    Parameters
+    ----------
+    n_splits : int, default=5
+        Number of splits. The actual number of yielded splits will be n_splits - 1.
+    """
+
+    def __init__(self, n_splits=5):
+        if n_splits < 2:
+            raise ValueError("n_splits must be at least 2 to perform cross-validation.")
+        self.n_splits = n_splits
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        """
+        Returns the number of splits that will be yielded.
+        Since fold 0 is skipped, it returns n_splits - 1.
+        """
+        return self.n_splits - 1
+
+    def split(self, X, y=None, groups=None):
+        if groups is None:
+            raise ValueError("Groups (user IDs) are required for PerUserForwardChainingCV.")
+
+        groups = np.array(groups)
+        unique_users = np.unique(groups)
+
+        logger.info(f"[PerUserForwardChainingCV] Unique users found: {len(unique_users)}")
+
+        # Build user -> chunks
+        user_chunks = {}
+        for user in unique_users:
+            user_indices = np.where(groups == user)[0]
+            user_indices = np.sort(user_indices)
+            n_samples = len(user_indices)
+
+            if n_samples < self.n_splits:
+                logger.warning(f"User '{user}' has only {n_samples} samples, less than n_splits={self.n_splits}. Assigning all to training.")
+                user_chunks[user] = [user_indices]
+                continue
+
+            # Partition into n_splits chunks
+            fold_sizes = np.full(self.n_splits, n_samples // self.n_splits, dtype=int)
+            fold_sizes[: (n_samples % self.n_splits)] += 1
+
+            starts = np.cumsum(fold_sizes)
+            chunks = []
+            prev = 0
+            for end in starts:
+                chunks.append(user_indices[prev:end])
+                prev = end
+            user_chunks[user] = chunks
+
+            logger.debug(f"User '{user}' has {n_samples} samples divided into {len(chunks)} chunks.")
+
+        # Yield splits, skipping fold 0
+        for i in range(self.n_splits):
+            if i == 0:
+                logger.debug(f"Skipping fold {i} to avoid empty training set.")
+                continue  # Skip fold 0
+
+            train_idx_list = []
+            test_idx_list = []
+
+            for user in unique_users:
+                chunks = user_chunks[user]
+                if i < len(chunks):
+                    test_idx_list.append(chunks[i])   # chunk i => test
+                for j in range(i):
+                    if j < len(chunks):
+                        train_idx_list.append(chunks[j])  # chunks < i => train
+
+            train_idx = np.concatenate(train_idx_list) if train_idx_list else np.array([], dtype=int)
+            test_idx  = np.concatenate(test_idx_list)  if test_idx_list  else np.array([], dtype=int)
+
+            # Skip fold if no training or test data
+            if len(train_idx) == 0:
+                logger.warning(f"Fold {i} has no training data => skipping fold.")
+                continue
+            if len(test_idx) == 0:
+                logger.warning(f"Fold {i} has no test data => skipping fold.")
+                continue
+
+            logger.debug(f"Fold {i}: train_size={len(train_idx)}, test_size={len(test_idx)}")
+            yield train_idx, test_idx
+            
+
+
+
+##############################################################################
+# MAIN ML PIPELINE CLASS
+##############################################################################
+
 class MLpipeline:
     def __init__(self, config, random_state=42):
         self.cfg = config
@@ -65,21 +170,41 @@ class MLpipeline:
         self.df_inner_train = None
         self.df_inner_test = None
 
-        print("[ML_Pipeline] Configuration Loaded:")
-        print(f"  Impute Strategy: {self.cfg.IMPUTE_STRATEGY}")
-        print(f"  Scaler Strategy: {self.cfg.SCALER_STRATEGY}")
-        print(f"  Holdout Ratio: {self.cfg.HOLDOUT_RATIO}")
-        print(f"  Time Ratio: {self.cfg.TIME_RATIO}")
-        print(f"  Number of Jobs: {self.cfg.N_JOBS}")
+        # Configure logger for MLpipeline
+        self.logger = logging.getLogger(self.__class__.__name__)
+        if not self.logger.hasHandlers():
+            handler = logging.StreamHandler(sys.stdout)
+            formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed logs
+
+        self.logger.info("[ML_Pipeline] Configuration Loaded:")
+        self.logger.info(f"  Impute Strategy: {self.cfg.IMPUTE_STRATEGY}")
+        self.logger.info(f"  Scaler Strategy: {self.cfg.SCALER_STRATEGY}")
+        self.logger.info(f"  Holdout Ratio: {self.cfg.HOLDOUT_RATIO}")
+        self.logger.info(f"  Time Ratio: {self.cfg.TIME_RATIO}")
+        self.logger.info(f"  Number of Jobs: {self.cfg.N_JOBS}")
+        self.logger.info(f"  Number of Folds (Inner CV): {self.cfg.N_INNER_CV}")
+        self.logger.info(f"  CV Method: {self.cfg.CV_METHOD} (expected 'forwardchaining' here)")
+
+    ##########################################################################
+    # Basic Data Setup
+    ##########################################################################
 
     def set_data(self, df):
         self.df_all = df.copy().reset_index(drop=True)
-        print(f"[set_data] DataFrame with {len(self.df_all)} rows loaded in pipeline.")
+        self.logger.info(f"[set_data] DataFrame with {len(self.df_all)} rows loaded in pipeline.")
 
     def outer_user_split(self):
+        """
+        Splits entire users into holdout or known sets.
+        e.g. if HOLDOUT_RATIO=0.2 and we have 50 users, 10 users go to holdout, 40 to 'known'.
+        """
         unique_users = self.df_all[self.cfg.USER_COL].unique()
         n_users = len(unique_users)
         n_holdout = int(np.floor(n_users * self.cfg.HOLDOUT_RATIO))
+
         rng = np.random.default_rng(self.random_state)
         shuffled = rng.permutation(unique_users)
         holdout_users = set(shuffled[:n_holdout])
@@ -88,10 +213,15 @@ class MLpipeline:
         self.df_holdout = self.df_all[mask_holdout].copy().reset_index(drop=True)
         self.df_known = self.df_all[~mask_holdout].copy().reset_index(drop=True)
 
-        print(f"[outer_user_split] Held out {n_holdout}/{n_users} users; "
-              f"holdout size: {len(self.df_holdout)} rows.")
+        self.logger.info(f"[outer_user_split] Held out {n_holdout}/{n_users} users; "
+                         f"holdout size: {len(self.df_holdout)} rows.")
 
     def inner_time_split(self):
+        """
+        For each user in df_known, do a time-based split:
+        first (TIME_RATIO)% => df_inner_train, last => df_inner_test.
+        e.g. if TIME_RATIO=0.8 => 80% for 'inner_train' and 20% for 'inner_test'.
+        """
         def split_by_time(df_user):
             df_sorted = df_user.sort_values(by=self.cfg.TIME_COL)
             cut = int(np.floor(len(df_sorted) * self.cfg.TIME_RATIO))
@@ -106,168 +236,347 @@ class MLpipeline:
         self.df_inner_train = pd.concat(train_list, axis=0).reset_index(drop=True)
         self.df_inner_test = pd.concat(test_list, axis=0).reset_index(drop=True)
 
-        print(f"[inner_time_split] Inner train size: {len(self.df_inner_train)}, "
-              f"test size: {len(self.df_inner_test)}.")
+        self.logger.info(f"[inner_time_split] Inner train size: {len(self.df_inner_train)}, "
+                         f"test size: {len(self.df_inner_test)}.")
 
-    def assign_feature_columns(self, feature_cols):
+    ##########################################################################
+    # CV Splits: Using PerUserForwardChainingCV or TimeSeriesSplit
+    ##########################################################################
+
+    def create_forwardchaining_cv(self):
+        """
+        Create a custom forward-chaining cross-validator for the 'inner_train' portion.
+        Returns:
+            cv: instance of PerUserForwardChainingCV
+            df: the DataFrame used for training (df_inner_train)
+        """
+        cv = PerUserForwardChainingCV(n_splits=self.cfg.N_INNER_CV)
+        self.logger.debug(f"Using PerUserForwardChainingCV with n_splits = {self.cfg.N_INNER_CV}")
+        return cv, self.df_inner_train
+
+    def create_forwardchaining_cv_test(self):
+        """
+        Create a TimeSeriesSplit cross-validator for testing purposes.
+        Returns:
+            cv: instance of TimeSeriesSplit
+            df: the DataFrame used for training (df_inner_train)
+        """
+        try:
+            cv = TimeSeriesSplit(n_splits=5)
+            self.logger.debug(f"Using TimeSeriesSplit with n_splits = {cv.get_n_splits()}")
+        except Exception as e:
+            self.logger.error("Error initializing TimeSeriesSplit:")
+            self.logger.error(e)
+            raise
+        return cv, self.df_inner_train
+
+    ##########################################################################
+    # Feature & Pipeline Setup
+    ##########################################################################
+
+    def assign_feature_columns(self, feature_cols, pipeline_name=None):
+        """
+        Assign feature columns for skewed, non-skewed, and categorical groups.
+        Optionally include the USER_COL for MERF pipelines.
+        """
         skewed_cols = [col for col in feature_cols if col in self.cfg.SKEWED_FEATURES]
-        non_skewed_cols = [col for col in feature_cols if col in self.cfg.numeric_features and col not in skewed_cols]
+        non_skewed_cols = [
+            col for col in feature_cols
+            if col in self.cfg.numeric_features and col not in skewed_cols
+        ]
         cat_cols = [col for col in feature_cols if col in self.cfg.categorical_features]
-        return skewed_cols, non_skewed_cols, cat_cols
+        user_col = self.cfg.USER_COL
+    
+        return skewed_cols, non_skewed_cols, cat_cols, user_col
 
+    
     def _get_feature_cols(self, pipeline_name):
+        """
+        Get the feature columns for the given pipeline name.
+    
+        Ensures 'customer' (USER_COL) is included only for MERF pipelines.
+        """
         base_features = (
             self.cfg.numeric_features +
             self.cfg.binary_features +
             self.cfg.categorical_features
         )
+    
+        # Include or exclude person_static_features based on pipeline type
         if "with_PS" in pipeline_name:
-            return list(set(base_features + self.cfg.person_static_features))
-        return list(set(base_features) - set(self.cfg.person_static_features))
+            feature_cols = list(set(base_features + self.cfg.person_static_features))
+        else:
+            feature_cols = list(set(base_features) - set(self.cfg.person_static_features))
+    
+        # Add USER_COL for MERF pipelines
+        if "MERF" in pipeline_name:
+            feature_cols.append(self.cfg.USER_COL)
+    
+        # Return unique feature columns (no duplicates)
+        return list(set(feature_cols))
 
-    def create_predefined_splits(self):
+    
+    def assign_feature_columns(self, feature_cols):
         """
-        Create a single PredefinedSplit object for cross-validation with time-based folds per user.
-        Returns:
-            PredefinedSplit: The PredefinedSplit object for cross-validation.
-            pd.DataFrame: The training DataFrame.
+        Assign feature columns for skewed, non-skewed, and categorical groups.
+        Does not handle USER_COL.
         """
-        test_fold = np.full(len(self.df_inner_train), -1)  # Default all to training (-1)
-        user_groups = self.df_inner_train.groupby(self.cfg.USER_COL)
+        skewed_cols = [col for col in feature_cols if col in self.cfg.SKEWED_FEATURES]
+        non_skewed_cols = [
+            col for col in feature_cols
+            if col in self.cfg.numeric_features and col not in skewed_cols
+        ]
+        cat_cols = [col for col in feature_cols if col in self.cfg.categorical_features]
     
-        for user, group in user_groups:
-            # Sort by time for each user
-            group = group.sort_values(by=self.cfg.TIME_COL)
-            indices = group.index.to_list()
+        return skewed_cols, non_skewed_cols, cat_cols
     
-            # Split user's data into 5 folds
-            n_samples = len(indices)
-            fold_size = n_samples // self.cfg.N_INNER_CV  # Divide user's data into folds
     
-            for fold in range(self.cfg.N_INNER_CV):
-                start = fold * fold_size
-                end = start + fold_size if fold < self.cfg.N_INNER_CV - 1 else n_samples
-                test_indices = indices[start:end]
-                for idx in test_indices:
-                    test_fold[idx] = fold  # Assign fold index to the `test_fold`
+    def _get_feature_cols(self, pipeline_name):
+        """
+        Get the feature columns for the given pipeline name.
     
-        predefined_split = PredefinedSplit(test_fold=test_fold)
+        Ensures 'customer' (USER_COL) is included only for MERF pipelines.
+        """
+        base_features = (
+            self.cfg.numeric_features +
+            self.cfg.binary_features +
+            self.cfg.categorical_features
+        )
     
-        print(f"[DEBUG] PredefinedSplit test fold counts: {np.bincount(test_fold[test_fold >= 0])}")
-        return predefined_split, self.df_inner_train
-
-
-    def build_preprocessor(self, feature_cols):
-        imputer_numeric = KNNImputer(n_neighbors=5) if self.cfg.IMPUTE_STRATEGY == "knn" else SimpleImputer(strategy=self.cfg.IMPUTE_STRATEGY)
-        scaler = MinMaxScaler() if self.cfg.SCALER_STRATEGY == "minmax" else StandardScaler()
+        # Include or exclude person_static_features based on pipeline type
+        if "with_PS" in pipeline_name:
+            feature_cols = list(set(base_features + self.cfg.person_static_features))
+        else:
+            feature_cols = list(set(base_features) - set(self.cfg.person_static_features))
+    
+        # Add USER_COL for MERF pipelines
+        if "MERF" in pipeline_name:
+            feature_cols.append(self.cfg.USER_COL)
+    
+        # Return unique feature columns (no duplicates)
+        return list(set(feature_cols))
+        
+    def build_preprocessor(self, feature_cols, pipeline_name):
+        """
+        Build a ColumnTransformer pipeline for numeric/categorical data.
+        Optionally includes USER_COL processing for specific pipelines.
+        """
+        if self.cfg.IMPUTE_STRATEGY == "knn":
+            imputer_numeric = KNNImputer(n_neighbors=5)
+        else:
+            imputer_numeric = SimpleImputer(strategy=self.cfg.IMPUTE_STRATEGY)
+    
+        if self.cfg.SCALER_STRATEGY == "minmax":
+            scaler = MinMaxScaler()
+        else:
+            scaler = StandardScaler()
+    
+        # Get feature groups
         skewed_cols, non_skewed_cols, cat_cols = self.assign_feature_columns(feature_cols)
-        skewed_numeric_pipeline = Pipeline([("impute", imputer_numeric), ("log", FunctionTransformer(np.log1p, validate=False)), ("scale", scaler)])
-        non_skewed_numeric_pipeline = Pipeline([("impute", imputer_numeric), ("scale", scaler)])
-        categorical_pipeline = Pipeline([("onehot", OneHotEncoder(handle_unknown="ignore"))])
-
-        preprocessor = ColumnTransformer([
+    
+        skewed_numeric_pipeline = Pipeline([
+            ("impute", imputer_numeric),
+            ("log", FunctionTransformer(np.log1p, validate=False)),
+            ("scale", scaler)
+        ])
+    
+        non_skewed_numeric_pipeline = Pipeline([
+            ("impute", imputer_numeric),
+            ("scale", scaler)
+        ])
+    
+        categorical_pipeline = Pipeline([
+            ("onehot", OneHotEncoder(handle_unknown="ignore"))
+        ])
+    
+        # Build transformers, including USER_COL only for MERF pipelines
+        transformers = [
             ("skewed_num", skewed_numeric_pipeline, skewed_cols),
             ("non_skewed_num", non_skewed_numeric_pipeline, non_skewed_cols),
             ("cat", categorical_pipeline, cat_cols),
-        ], remainder="drop")
-
+        ]
+    
+        # Add USER_COL processing for MERF pipelines
+        if "MERF" in pipeline_name and self.cfg.USER_COL in feature_cols:
+            user_col_pipeline = Pipeline([("label_enc", OrdinalEncoder())])
+            transformers.append(("user_col", user_col_pipeline, [self.cfg.USER_COL]))
+    
+        preprocessor = ColumnTransformer(transformers, remainder="drop")
         return preprocessor
+    
 
-    def run(self, pipeline_grid_dict, task_type="regression", scoring=None, refit="mae"):
+
+    ##########################################################################
+    # Main run: cross-validation + final refit
+    ##########################################################################
+
+    def run(self, pipeline_grid_dict, task_type="regression", scoring=None, refit="mae", do_final_refit=True):
+        self.logger.info("[run] Starting the ML pipeline run method.")
+    
+        # If no scoring is provided, use standard metrics
         if scoring is None:
             scoring = {
-                "r2": "r2",
-                "mae": "neg_mean_absolute_error",
-                "rmse": "neg_root_mean_squared_error",
+                "r2": "r2",                        # Standard R^2
+                "mae": "neg_mean_absolute_error",   # Negative MAE
+                "rmse": "neg_root_mean_squared_error",  # Negative RMSE
             }
     
         results_timebased = []
     
-        # Create predefined splits and retrieve training data
-        predefined_split, train_df = self.create_predefined_splits()
+        # 1) Create the cross-validator on df_inner_train
+        try:
+            self.logger.debug("Attempting to create forward-chaining cross-validator.")
+            cv, train_df = self.create_forwardchaining_cv()
+            self.logger.info("[run_grid_search] Cross-validator and inner training data obtained.")
+        except Exception as e:
+            self.logger.error("Error creating cross-validator:")
+            self.logger.error(e)
+            raise
+    
+        # 2) Iterate over each pipeline configuration
+        self.logger.debug("[run] Starting GridSearchCV for each pipeline.")
     
         for pipeline_name, (raw_pipeline, param_grid) in pipeline_grid_dict.items():
-            print(f"\n[run] Starting pipeline: {pipeline_name}")
+            self.logger.info(f"\n[run] Starting pipeline: {pipeline_name}")
             feature_cols = self._get_feature_cols(pipeline_name)
+            self.logger.debug(f"[{pipeline_name}] Feature columns selected: {feature_cols}")
     
-            # Extract train data
-            X_train = train_df[feature_cols]
-            y_train = train_df[self.cfg.LABEL_COL]
-            clusters_train = train_df[self.cfg.USER_COL]
+            try:
+                X_train = train_df[feature_cols].copy()  # Copy to avoid modifying the original
+                y_train = train_df[self.cfg.LABEL_COL]
+                
+         # For MERF pipelines, extract cluster and intercept columns
+                if "MERF" in pipeline_name:
+                    clusters_train = LabelEncoder().fit_transform(train_df[self.cfg.USER_COL])
+                    intercept_train = np.ones(X_train.shape[0])
+                    # Remove 'customer' and 'intercept' from X_train features
+                    X_train = X_train.drop(columns=[self.cfg.USER_COL, "intercept"], errors="ignore")
+
     
-            # Define Z for MERF pipelines
-            if hasattr(self.cfg, "RANDOM_EFFECT_FEATURES"):
-                Z_train = pd.DataFrame(train_df[self.cfg.RANDOM_EFFECT_FEATURES].values, index=X_train.index)
-            else:
-                Z_train = pd.DataFrame(np.ones((X_train.shape[0], 1)), index=X_train.index)
+            # Extract group labels (user IDs) for cross-validation
+            try:
+                groups = train_df[self.cfg.USER_COL]
+                self.logger.debug(f"[{pipeline_name}] Group labels extracted for cross-validation.")
+            except KeyError as e:
+                self.logger.error(f"[{pipeline_name}] Group column not found: {e}")
+                continue  # Skip to the next pipeline
     
-            # Define inner test set
-            X_inner_test = self.df_inner_test[feature_cols]
-            y_inner_test = self.df_inner_test[self.cfg.LABEL_COL]
-            clusters_inner_test = self.df_inner_test[self.cfg.USER_COL]
+            # Build preprocessor
+            try:
+                preprocessor = self.build_preprocessor(feature_cols, pipeline_name=pipeline_name)
+                self.logger.debug(f"[{pipeline_name}] Preprocessor built successfully.")
+            except Exception as e:
+                self.logger.error(f"[{pipeline_name}] Error building preprocessor: {e}")
+                continue  # Skip to the next pipeline
     
-            if hasattr(self.cfg, "RANDOM_EFFECT_FEATURES"):
-                Z_inner_test = pd.DataFrame(self.df_inner_test[self.cfg.RANDOM_EFFECT_FEATURES].values, index=X_inner_test.index)
-            else:
-                Z_inner_test = pd.DataFrame(np.ones((X_inner_test.shape[0], 1)), index=X_inner_test.index)
+            # Combine preprocessor with the raw pipeline steps
+            try:
+                combined_pipeline = Pipeline([
+                    ("preprocessor", preprocessor)
+                ] + list(raw_pipeline.steps))
+                self.logger.debug(f"[{pipeline_name}] Combined pipeline created.")
+            except Exception as e:
+                self.logger.error(f"[{pipeline_name}] Error combining pipeline steps: {e}")
+                continue  # Skip to the next pipeline
     
-            # Preprocessor and pipeline setup
-            preprocessor = self.build_preprocessor(feature_cols)
-            steps = [("preprocessor", preprocessor)] + list(raw_pipeline.steps)
-            combined_pipeline = Pipeline(steps=steps)
-    
-            # Perform GridSearchCV
-            print(f"[DEBUG] Starting GridSearchCV for {pipeline_name}...")
+            # Initialize GridSearchCV
+            self.logger.debug(f"[{pipeline_name}] Starting GridSearchCV (forward-chaining)...")
             gs = GridSearchCV(
                 estimator=combined_pipeline,
                 param_grid=param_grid,
-                scoring=custom_scorers if "MERF" in pipeline_name else scoring,
+                scoring=scoring,
                 refit=refit,
-                return_train_score=True,
-                cv=predefined_split,
+                cv=cv,  # PerUserForwardChainingCV instance
                 n_jobs=self.cfg.N_JOBS,
+                error_score='raise'  # Ensure errors are raised
             )
     
-            # Fit parameters for MERF
-            fit_params = {}
-            if "MERF" in pipeline_name:
-                fit_params = {
-                    "model_MERF__Z": Z_train,
-                    "model_MERF__clusters": clusters_train,
+            # Fit GridSearchCV with groups
+            try:
+                self.logger.info(f"[{pipeline_name}] Fitting GridSearchCV.")
+                self.logger.info(f"[{pipeline_name}] Columns in training data: {X_train.columns if isinstance(X_train, pd.DataFrame) else 'Not a DataFrame'}")
+                self.logger.info(f"[{pipeline_name}] USER_COL: {self.cfg.USER_COL} included in feature_cols: {self.cfg.USER_COL in feature_cols}")
+
+                gs.fit(X_train, y_train, groups=groups)
+                self.logger.info(f"[{pipeline_name}] GridSearchCV completed.")
+                self.logger.info(f"[{pipeline_name}] Best Parameters: {gs.best_params_}")
+                self.logger.info(f"[{pipeline_name}] Best CV Score ({refit}): {gs.best_score_:.3f}")
+            except ValueError as e:
+                self.logger.error(f"[ERROR] GridSearchCV failed for pipeline {pipeline_name}: {e}")
+                continue  # Skip to the next pipeline
+            except Exception as e:
+                self.logger.error(f"[ERROR] Unexpected error during GridSearchCV for pipeline {pipeline_name}: {e}")
+                continue  # Skip to the next pipeline
+    
+            # Define X_inner_test and y_inner_test within the loop
+            try:
+                X_inner_test = self.df_inner_test[feature_cols]
+                y_inner_test = self.df_inner_test[self.cfg.LABEL_COL]
+                self.logger.debug(f"[{pipeline_name}] Inner test set prepared: X_inner_test shape = {X_inner_test.shape}")
+            except KeyError as e:
+                self.logger.error(f"[{pipeline_name}] Inner test set preparation failed: {e}")
+                continue  # Skip to the next pipeline
+    
+            # Make predictions on inner test set
+            try:
+                self.logger.debug(f"[{pipeline_name}] Making predictions on inner test set.")
+                test_predictions = gs.predict(X_inner_test)
+                self.logger.debug(f"[{pipeline_name}] Predictions on inner test set completed.")
+            except Exception as e:
+                self.logger.error(f"[{pipeline_name}] Error during prediction on inner test set:")
+                self.logger.error(e)
+                continue  # Skip to the next pipeline
+    
+            # Evaluate test set metrics
+            try:
+                test_scores = {
+                    "r2": r2_score(y_inner_test, test_predictions),
+                    "mae": mean_absolute_error(y_inner_test, test_predictions),
+                    "rmse": np.sqrt(mean_squared_error(y_inner_test, test_predictions)),
                 }
+                self.logger.info(f"[{pipeline_name}] Inner Test Scores: {test_scores}")
+            except Exception as e:
+                self.logger.error(f"[{pipeline_name}] Error during evaluation of inner test set:")
+                self.logger.error(e)
+                continue  # Skip to the next pipeline
     
-            # Fit the model
-            gs.fit(X_train, y_train, **fit_params)
-            best_model = gs.best_estimator_
-            best_score = gs.best_score_
+            # Optional final refit
+            if do_final_refit:
+                self.logger.debug(f"[{pipeline_name}] Re-fitting on (inner_train + inner_test) to maximize data usage...")
+                try:
+                    X_full = pd.concat([X_train, X_inner_test], axis=0)
+                    y_full = pd.concat([y_train, y_inner_test], axis=0)
+                    self.logger.debug(f"[{pipeline_name}] Full training data prepared: X_full shape = {X_full.shape}")
+                except Exception as e:
+                    self.logger.error(f"[{pipeline_name}] Error during concatenation for final refit:")
+                    self.logger.error(e)
+                    continue  # Skip to the next pipeline
     
-            print(f"[{pipeline_name}] Best CV Score ({refit}): {best_score:.3f}")
-            print(f"[{pipeline_name}] Best Params: {gs.best_params_}")
+                # Rebuild the pipeline with the best parameters
+                final_pipeline = Pipeline([
+                    ("preprocessor", preprocessor)
+                ] + list(raw_pipeline.steps))
+                final_pipeline.set_params(**gs.best_params_)
+                try:
+                    self.logger.debug(f"[{pipeline_name}] Fitting final pipeline on full data.")
+                    final_pipeline.fit(X_full, y_full)
+                    self.logger.info(f"[{pipeline_name}] Final refit completed.")
+                except Exception as e:
+                    self.logger.error(f"[{pipeline_name}] Final refit failed:")
+                    self.logger.error(e)
+                    continue  # Skip to the next pipeline
     
-            # Test set evaluation
-            if "MERF" in pipeline_name:
-                test_predictions = best_model.predict(X_inner_test, Z=Z_inner_test, clusters=clusters_inner_test)
+                final_model = final_pipeline
             else:
-                test_predictions = best_model.predict(X_inner_test)
-    
-            # Calculate test scores
-            test_scores = {
-                "r2": r2_score(y_inner_test, test_predictions),
-                "mae": mean_absolute_error(y_inner_test, test_predictions),
-                "rmse": np.sqrt(mean_squared_error(y_inner_test, test_predictions)),
-            }
-    
-            print(f"[{pipeline_name}] Inner Test Scores: {test_scores}")
+                final_model = gs.best_estimator_
     
             # Append results
             results_timebased.append({
                 "pipeline_name": pipeline_name,
-                "best_cv_score": best_score,
+                "best_cv_score": gs.best_score_,
                 "inner_test_scores": test_scores,
-                "best_estimator": best_model,
+                "best_estimator": final_model,
             })
     
+        self.logger.info("[run] ML pipeline run method completed.")
         return results_timebased
-    
-    
-    

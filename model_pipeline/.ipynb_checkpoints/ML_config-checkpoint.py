@@ -3,20 +3,32 @@
 #################################
 
 from imblearn.pipeline import Pipeline
+from sklearn.base import BaseEstimator, TransformerMixin
+
+import numpy as np
+import pandas as pd
+
 from sklearn.feature_selection import VarianceThreshold
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OrdinalEncoder
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
-from sklearn.compose import TransformedTargetRegressor
+from sklearn.compose import TransformedTargetRegressor, ColumnTransformer
 from merf.merf import MERF
-from model_pipeline.custom_models import MERFWrapper  # Import the wrapper
+from custom_models import MERFWrapperEmbed  # Import the wrapper
+
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+#################################
+# Define Custom Transformers
+#################################
 
 
-# Define regression model settings in a dictionary.
-# Each key is a descriptive pipeline name.
-# Define regression model settings in a dictionary.
-# Each key is a descriptive pipeline name.
+
 Regression_model_settings = {
     "LR_without_PS": (
         Pipeline([
@@ -41,8 +53,7 @@ Regression_model_settings = {
         {"model_TTR__regressor__fit_intercept": [True]}
     ),
 
-
-    # Random Forest WITHOUT PS (Population-based)
+    # Random Forest WITHOUT PS (Population-based) - Currently commented out
 #    "RF_without_PS": (
 #        Pipeline([
 #            ("varth", VarianceThreshold()),
@@ -53,14 +64,14 @@ Regression_model_settings = {
 #            ))
 #        ]),
 #        {
-#        "model_TTR__regressor__n_estimators": [100, 200, 300],
-#        "model_TTR__regressor__max_depth": [10, 20, None],
-#        "model_TTR__regressor__min_samples_split": [2, 5, 10],
-#        "model_TTR__regressor__max_features": ['sqrt', 'log2'],
+#            "model_TTR__regressor__n_estimators": [100, 200, 300],
+#            "model_TTR__regressor__max_depth": [10, 20, None],
+#            "model_TTR__regressor__min_samples_split": [2, 5, 10],
+#            "model_TTR__regressor__max_features": ['sqrt', 'log2'],
 #        }
 #    ),
 
-    # Updated hyperparameters for RF_with_PS
+    # Updated hyperparameters for RF_with_PS - Currently commented out
 #    "RF_with_PS": (
 #        Pipeline([
 #            ("varth", VarianceThreshold()),
@@ -78,35 +89,44 @@ Regression_model_settings = {
 #        }
 #    ),
 
-
-    # MERF WITHOUT PS (Personalized) => We do NOT wrap with TTR
-    # => outcome is NOT standardized
-    # MERF WITHOUT PS (Personalized)
     "MERF_without_PS": (
         Pipeline([
-            ("varth", VarianceThreshold()),
-            ("scale_features", StandardScaler()),
-            ("model_MERF", MERFWrapper(gll_early_stop_threshold=0.01, max_iterations=20))
+            ("varth", VarianceThreshold()),  # Apply variance threshold first
+            ("scale_features", StandardScaler()),  # Scale numeric features
+            ("model_MERF", TransformedTargetRegressor(
+                regressor=MERFWrapperEmbed(
+                    gll_early_stop_threshold=0.01,
+                    max_iterations=10,
+                    rf__n_estimators=100,
+                ),
+                transformer=StandardScaler()  # Standardize the target variable
+            ))
         ]),
         {
-            "model_MERF__max_iterations": [10, 20],
-            "model_MERF__rf__n_estimators": [10, 50,100],          # Random Forest parameters
+            "model_MERF__regressor__max_iterations": [10],
+            "model_MERF__regressor__rf__n_estimators": [50],  # Tunable RF param
         }
     ),
-
-    # MERF WITH PS (Personalized)
+    
     "MERF_with_PS": (
         Pipeline([
-            ("varth", VarianceThreshold()),
-            ("scale_features", StandardScaler()),
-            ("model_MERF", MERFWrapper(gll_early_stop_threshold=0.01, max_iterations=20))
+            ("varth", VarianceThreshold()),  # Apply variance threshold first
+            ("scale_features", StandardScaler()),  # Scale numeric features
+            ("model_MERF", TransformedTargetRegressor(
+                regressor=MERFWrapperEmbed(
+                    gll_early_stop_threshold=0.01,
+                    max_iterations=20,
+                    rf__n_estimators=300,
+                ),
+                transformer=StandardScaler()  # Standardize the target variable
+            ))
         ]),
         {
-            "model_MERF__max_iterations": [10, 20],
-            "model_MERF__rf__n_estimators": [10, 50,100],  
+            "model_MERF__regressor__max_iterations": [10],
+            "model_MERF__regressor__rf__n_estimators": [50]
         }
-    ),
 
+    ),
     "FFNN_without_PS": (
         Pipeline([
             ("varth", VarianceThreshold()),
@@ -123,7 +143,7 @@ Regression_model_settings = {
             "model_TTR__regressor__alpha": [0.0001, 0.001]
         }
     ),
-    
+
     "FFNN_with_PS": (
         Pipeline([
             ("varth", VarianceThreshold()),
@@ -138,8 +158,11 @@ Regression_model_settings = {
             "model_TTR__regressor__alpha": [0.0001, 0.001]
         }
     )
-        
 }
+
+#################################
+# Define Config Class
+#################################
 
 class Config:
     """
@@ -200,11 +223,12 @@ class Config:
     IMPUTE_STRATEGY = "knn"
     SCALER_STRATEGY = "minmax"
 
+    # 7) Regression Model Settings
     ANALYSIS = {
         "neg_affect_regression": {
             "TASK_TYPE": "regression",
             "LABEL": LABEL_COL,
-            "MODEL_PIPEGRIDS": Regression_model_settings,
+            "MODEL_PIPEGRIDS": {},  # To be defined below
             "METRICS": {
                 "r2": "r2",
                 "mae": "neg_mean_absolute_error",
@@ -214,13 +238,14 @@ class Config:
         }
     }
 
-
-
+    # Assign Regression_model_settings to MODEL_PIPEGRIDS in ANALYSIS
+    ANALYSIS["neg_affect_regression"]["MODEL_PIPEGRIDS"] = Regression_model_settings
 
     # 8) Splitting Parameters
     HOLDOUT_RATIO = 0.1
     TIME_RATIO = 0.8
     N_INNER_CV = 5
+    CV_METHOD = "forwardchaining"
 
     # 9) Holdout Evaluation
     HOLDOUT_EVAL_RATIO = 0.2
