@@ -15,7 +15,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.compose import TransformedTargetRegressor, ColumnTransformer
 from merf.merf import MERF
-from custom_models import MERFWrapperEmbed  # Import the wrapper
+from custom_models import MERFWrapperEmbed, GroupwiseStandardizingRegressor  # Import the wrapper
 
 import logging
 
@@ -32,25 +32,23 @@ logger = logging.getLogger(__name__)
 Regression_model_settings = {
     "LR_without_PS": (
         Pipeline([
-            ("varth", VarianceThreshold()),
-            ("scale_features", StandardScaler()),
-            ("model_TTR", TransformedTargetRegressor(
+            ("model_LR", TransformedTargetRegressor(
                 regressor=LinearRegression(),
-                transformer=StandardScaler()  # standardize y
+                transformer=StandardScaler()  # Standardize y
             ))
         ]),
-        {"model_TTR__regressor__fit_intercept": [True]}
+        {
+            "model_LR__regressor__fit_intercept": [True, False]  # ✅ Use correct step name
+        }
     ),
     "LR_with_PS": (
         Pipeline([
-            ("varth", VarianceThreshold()),
-            ("scale_features", StandardScaler()),
-            ("model_TTR", TransformedTargetRegressor(
+            ("model_LRPS", TransformedTargetRegressor(
                 regressor=LinearRegression(),
                 transformer=StandardScaler()
             ))
         ]),
-        {"model_TTR__regressor__fit_intercept": [True]}
+        {"model_LRPS__regressor__fit_intercept": [True, False]}
     ),
 
     # Random Forest WITHOUT PS (Population-based) - Currently commented out
@@ -91,16 +89,12 @@ Regression_model_settings = {
 
     "MERF_without_PS": (
         Pipeline([
-            ("varth", VarianceThreshold()),  # Apply variance threshold first
-            ("scale_features", StandardScaler()),  # Scale numeric features
-            ("model_MERF", TransformedTargetRegressor(
-                regressor=MERFWrapperEmbed(
+            ("model_MERF", MERFWrapperEmbed(
                     gll_early_stop_threshold=0.01,
                     max_iterations=10,
                     rf__n_estimators=100,
-                ),
-                transformer=StandardScaler()  # Standardize the target variable
-            ))
+                )
+            )
         ]),
         {
             "model_MERF__regressor__max_iterations": [10, 15],
@@ -110,16 +104,12 @@ Regression_model_settings = {
     
     "MERF_with_PS": (
         Pipeline([
-            ("varth", VarianceThreshold()),  # Apply variance threshold first
-            ("scale_features", StandardScaler()),  # Scale numeric features
-            ("model_MERF", TransformedTargetRegressor(
-                regressor=MERFWrapperEmbed(
+            ("model_MERF", MERFWrapperEmbed(
                     gll_early_stop_threshold=0.01,
-                    max_iterations=20,
-                    rf__n_estimators=300,
-                ),
-                transformer=StandardScaler()  # Standardize the target variable
-            ))
+                    max_iterations=10,
+                    rf__n_estimators=100,
+                )
+            )
         ]),
         {
             "model_MERF__regressor__max_iterations": [10, 15],
@@ -129,8 +119,6 @@ Regression_model_settings = {
     ),
     "FFNN_without_PS": (
         Pipeline([
-            ("varth", VarianceThreshold()),
-            ("scale", StandardScaler()),
             # Wrap MLPRegressor in TransformedTargetRegressor so y is standardized
             ("model_TTR", TransformedTargetRegressor(
                 regressor=MLPRegressor(random_state=42, max_iter=500),
@@ -146,8 +134,6 @@ Regression_model_settings = {
 
     "FFNN_with_PS": (
         Pipeline([
-            ("varth", VarianceThreshold()),
-            ("scale", StandardScaler()),
             ("model_TTR", TransformedTargetRegressor(
                 regressor=MLPRegressor(random_state=42, max_iter=500),
                 transformer=StandardScaler()
@@ -206,12 +192,13 @@ class Config:
     numeric_features = SKEWED_FEATURES + ['apparent_temperature_mean']
     binary_features = ['somatic_problems', 'psychotropic', 'ema_smartphone', 'weekend']
     categorical_features = [
-        'weekday', 'prior_treatment_description_simple', 'quest_create_hour', 'season', 'time_of_day'
+        'weekday', 'prior_treatment_description_simple', 'quest_create_hour', 'season', 'time_of_day', 'employability_description_simple'
     ]
     person_static_features = [
-        'age', 'somatic_problems', 'psychotropic',
+        'age', 'somatic_problems', 'psychotropic','employability_description_simple',
         'prior_treatment_description_simple', 'ema_smartphone'
     ]
+    merf_cols = ["customer","intercept"]
 
     # 5) Feature Types (used during preprocessing)
     FEATURE_TYPES = {

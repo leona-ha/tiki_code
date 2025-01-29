@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin,RegressorMixin
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, OneHotEncoder, FunctionTransformer,OrdinalEncoder, LabelEncoder
@@ -18,6 +18,7 @@ from sklearn.preprocessing import OneHotEncoder, FunctionTransformer
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
 
 # Configure logging for the module
 logging.basicConfig(
@@ -60,7 +61,6 @@ custom_scorers = {
 ##############################################################################
 # FORWARD CHAINING CROSS-VALIDATOR
 ##############################################################################
-from sklearn.model_selection import BaseCrossValidator
 
 
 class PerUserForwardChainingCV(BaseCrossValidator):
@@ -152,7 +152,6 @@ class PerUserForwardChainingCV(BaseCrossValidator):
 
             logger.debug(f"Fold {i}: train_size={len(train_idx)}, test_size={len(test_idx)}")
             yield train_idx, test_idx
-            
 
 
 
@@ -285,51 +284,9 @@ class MLpipeline:
             if col in self.cfg.numeric_features and col not in skewed_cols
         ]
         cat_cols = [col for col in feature_cols if col in self.cfg.categorical_features]
-        user_col = self.cfg.USER_COL
-    
-        return skewed_cols, non_skewed_cols, cat_cols, user_col
 
-    
-    def _get_feature_cols(self, pipeline_name):
-        """
-        Get the feature columns for the given pipeline name.
-    
-        Ensures 'customer' (USER_COL) is included only for MERF pipelines.
-        """
-        base_features = (
-            self.cfg.numeric_features +
-            self.cfg.binary_features +
-            self.cfg.categorical_features
-        )
-    
-        # Include or exclude person_static_features based on pipeline type
-        if "with_PS" in pipeline_name:
-            feature_cols = list(set(base_features + self.cfg.person_static_features))
-        else:
-            feature_cols = list(set(base_features) - set(self.cfg.person_static_features))
-    
-        # Add USER_COL for MERF pipelines
-        if "MERF" in pipeline_name:
-            feature_cols.append(self.cfg.USER_COL)
-    
-        # Return unique feature columns (no duplicates)
-        return list(set(feature_cols))
-
-    
-    def assign_feature_columns(self, feature_cols):
-        """
-        Assign feature columns for skewed, non-skewed, and categorical groups.
-        Does not handle USER_COL.
-        """
-        skewed_cols = [col for col in feature_cols if col in self.cfg.SKEWED_FEATURES]
-        non_skewed_cols = [
-            col for col in feature_cols
-            if col in self.cfg.numeric_features and col not in skewed_cols
-        ]
-        cat_cols = [col for col in feature_cols if col in self.cfg.categorical_features]
-    
         return skewed_cols, non_skewed_cols, cat_cols
-    
+
     
     def _get_feature_cols(self, pipeline_name):
         """
@@ -342,46 +299,53 @@ class MLpipeline:
             self.cfg.binary_features +
             self.cfg.categorical_features
         )
-    
         # Include or exclude person_static_features based on pipeline type
         if "with_PS" in pipeline_name:
             feature_cols = list(set(base_features + self.cfg.person_static_features))
         else:
             feature_cols = list(set(base_features) - set(self.cfg.person_static_features))
     
-        # Add USER_COL for MERF pipelines
+        # Add MERF-specific columns for MERF pipelines
         if "MERF" in pipeline_name:
-            feature_cols.append(self.cfg.USER_COL)
-    
+            feature_cols.extend(self.cfg.merf_cols)  # Assuming self.cfg.merf_cols = ['customer', 'intercept']
+
+            
         # Return unique feature columns (no duplicates)
         return list(set(feature_cols))
-        
+
+
+    
     def build_preprocessor(self, feature_cols, pipeline_name):
         """
         Build a ColumnTransformer pipeline for numeric/categorical data.
-        Optionally includes USER_COL processing for specific pipelines.
+        Passes only 'intercept' through without transformation.
         """
+        # Define imputers based on configuration
         if self.cfg.IMPUTE_STRATEGY == "knn":
             imputer_numeric = KNNImputer(n_neighbors=5)
         else:
             imputer_numeric = SimpleImputer(strategy=self.cfg.IMPUTE_STRATEGY)
     
+        # Define scalers based on configuration
         if self.cfg.SCALER_STRATEGY == "minmax":
             scaler = MinMaxScaler()
         else:
             scaler = StandardScaler()
     
         # Get feature groups
-        skewed_cols, non_skewed_cols, cat_cols = self.assign_feature_columns(feature_cols)
+        skewed_cols, non_skewed_cols, cat_cols = self.assign_feature_columns(feature_cols, pipeline_name)
     
+        # Define pipelines for different feature types
         skewed_numeric_pipeline = Pipeline([
             ("impute", imputer_numeric),
-            ("log", FunctionTransformer(np.log1p, validate=False)),
+            ("log_transform", FunctionTransformer(np.log1p, validate=False)),
+            ("varth", VarianceThreshold()),  # Apply VarianceThreshold here
             ("scale", scaler)
         ])
     
         non_skewed_numeric_pipeline = Pipeline([
             ("impute", imputer_numeric),
+            ("varth", VarianceThreshold()),  # Apply VarianceThreshold here
             ("scale", scaler)
         ])
     
@@ -389,21 +353,30 @@ class MLpipeline:
             ("onehot", OneHotEncoder(handle_unknown="ignore"))
         ])
     
-        # Build transformers, including USER_COL only for MERF pipelines
+        # Initialize list of transformers
         transformers = [
             ("skewed_num", skewed_numeric_pipeline, skewed_cols),
             ("non_skewed_num", non_skewed_numeric_pipeline, non_skewed_cols),
             ("cat", categorical_pipeline, cat_cols),
         ]
+
+        # Pass through 'customer' and 'intercept' without transformation
+        if "MERF" in pipeline_name:
+            transformers.append(("customer_pass", "passthrough", ["customer"]))
+            transformers.append(("intercept_pass", "passthrough", ["intercept"]))
     
-        # Add USER_COL processing for MERF pipelines
-        if "MERF" in pipeline_name and self.cfg.USER_COL in feature_cols:
-            user_col_pipeline = Pipeline([("label_enc", OrdinalEncoder())])
-            transformers.append(("user_col", user_col_pipeline, [self.cfg.USER_COL]))
+        # Instantiate the ColumnTransformer
+        column_transformer = ColumnTransformer(
+            transformers=transformers,
+            remainder='drop'  # Pass any columns not specified in transformers
+        )
+        
+        preprocessor = Pipeline([
+            ("column_transformer", column_transformer),
+        ])
     
-        preprocessor = ColumnTransformer(transformers, remainder="drop")
         return preprocessor
-    
+
 
 
     ##########################################################################
@@ -441,27 +414,12 @@ class MLpipeline:
     
             X_train = train_df[feature_cols].copy()  # Copy to avoid modifying the original
             y_train = train_df[self.cfg.LABEL_COL]
-                    
-            # Handle MERF-specific features
-            if "MERF" in pipeline_name:
-                label_encoder = LabelEncoder()
-                clusters_train = label_encoder.fit_transform(train_df[self.cfg.USER_COL])
-                intercept_train = np.ones(X_train.shape[0])
-                X_train["cluster"] = clusters_train
-                X_train["intercept"] = intercept_train
-    
-    
-            try:
-                groups = train_df[self.cfg.USER_COL]
-                self.logger.debug(f"[{pipeline_name}] Group labels extracted for cross-validation.")
-            except KeyError as e:
-                self.logger.error(f"[{pipeline_name}] Group column not found: {e}")
-                continue
+            groups = train_df[self.cfg.USER_COL]
+            print(X_train.shape)
     
             preprocessor = self.build_preprocessor(feature_cols, pipeline_name=pipeline_name)
             combined_pipeline = Pipeline([("preprocessor", preprocessor)] + list(raw_pipeline.steps))
 
-    
             self.logger.debug(f"[{pipeline_name}] Starting GridSearchCV (forward-chaining)...")
             gs = GridSearchCV(
                 estimator=combined_pipeline,
@@ -486,30 +444,9 @@ class MLpipeline:
                 self.logger.error(f"[ERROR] Unexpected error during GridSearchCV for pipeline {pipeline_name}: {e}")
                 continue
     
-            try:
-                X_inner_test = self.df_inner_test[feature_cols].copy()
-                y_inner_test = self.df_inner_test[self.cfg.LABEL_COL]
-    
-                if "MERF" in pipeline_name:
-                    clusters_inner_test = label_encoder.transform(self.df_inner_test[self.cfg.USER_COL])
-                    intercept_inner_test = np.ones(X_inner_test.shape[0])
-                    X_inner_test["cluster"] = clusters_inner_test
-                    X_inner_test["intercept"] = intercept_inner_test
-    
-                self.logger.debug(f"[{pipeline_name}] Inner test set prepared.")
-            except KeyError as e:
-                self.logger.error(f"[{pipeline_name}] Inner test set preparation failed: {e}")
-                continue
-    
-            try:
-                self.logger.debug(f"[{pipeline_name}] Making predictions on inner test set.")
-                test_predictions = gs.predict(X_inner_test)
-                self.logger.debug(f"[{pipeline_name}] Predictions on inner test set completed.")
-            except Exception as e:
-                self.logger.error(f"[{pipeline_name}] Error during prediction on inner test set:")
-                self.logger.error(e)
-                continue
-    
+            X_inner_test = self.df_inner_test[feature_cols].copy()
+            y_inner_test = self.df_inner_test[self.cfg.LABEL_COL]
+            test_predictions = gs.predict(X_inner_test)
             try:
                 test_scores = {
                     "r2": r2_score(y_inner_test, test_predictions),
@@ -517,6 +454,7 @@ class MLpipeline:
                     "rmse": np.sqrt(mean_squared_error(y_inner_test, test_predictions)),
                 }
                 self.logger.info(f"[{pipeline_name}] Inner Test Scores: {test_scores}")
+                
             except Exception as e:
                 self.logger.error(f"[{pipeline_name}] Error during evaluation of inner test set:")
                 self.logger.error(e)
