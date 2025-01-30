@@ -155,6 +155,8 @@ class PerUserForwardChainingCV(BaseCrossValidator):
 
 
 
+
+
 ##############################################################################
 # MAIN ML PIPELINE CLASS
 ##############################################################################
@@ -308,11 +310,10 @@ class MLpipeline:
         # Add MERF-specific columns for MERF pipelines
         if "MERF" in pipeline_name:
             feature_cols.extend(self.cfg.merf_cols)  # Assuming self.cfg.merf_cols = ['customer', 'intercept']
-
+        print(feature_cols)
             
         # Return unique feature columns (no duplicates)
         return list(set(feature_cols))
-
 
     
     def build_preprocessor(self, feature_cols, pipeline_name):
@@ -378,7 +379,6 @@ class MLpipeline:
         return preprocessor
 
 
-
     ##########################################################################
     # Main run: cross-validation + final refit
     ##########################################################################
@@ -441,8 +441,12 @@ class MLpipeline:
                 self.logger.error(f"[ERROR] GridSearchCV failed for pipeline {pipeline_name}: {e}")
                 continue
             except Exception as e:
-                self.logger.error(f"[ERROR] Unexpected error during GridSearchCV for pipeline {pipeline_name}: {e}")
-                continue
+                import traceback
+                self.logger.error(f"[{pipeline_name}] [ERROR] GridSearchCV failed:")
+                self.logger.error(e)
+                print("Full traceback:")
+                traceback.print_exc()  # Shows exactly where the error happened!
+                raise
     
             X_inner_test = self.df_inner_test[feature_cols].copy()
             y_inner_test = self.df_inner_test[self.cfg.LABEL_COL]

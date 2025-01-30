@@ -93,12 +93,11 @@ Regression_model_settings = {
                     gll_early_stop_threshold=0.01,
                     max_iterations=10,
                     rf__n_estimators=100,
-                )
-            )
+                ))
         ]),
         {
-            "model_MERF__regressor__max_iterations": [10, 15],
-            "model_MERF__regressor__rf__n_estimators": [50,100],  # Tunable RF param
+            "model_MERF__max_iterations": [10, 15], 
+            "model_MERF__rf__n_estimators": [50, 100]
         }
     ),
     
@@ -112,8 +111,8 @@ Regression_model_settings = {
             )
         ]),
         {
-            "model_MERF__regressor__max_iterations": [10, 15],
-            "model_MERF__regressor__rf__n_estimators": [50, 100]
+            "model_MERF__max_iterations": [10, 15], 
+            "model_MERF__rf__n_estimators": [50, 100]
         }
 
     ),
@@ -240,7 +239,7 @@ class Config:
     HOLDOUT_ADAPT_STRATEGIES = ["MERF", "NN_embeddings"]
 
     # 10) Execution
-    N_JOBS = 2
+    N_JOBS = 1
     PARALLELIZE = True
     SAVE_MODELS = True
     DEBUG = False
