@@ -5,19 +5,16 @@ from sklearn.base import BaseEstimator, TransformerMixin,RegressorMixin
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, OneHotEncoder, FunctionTransformer,OrdinalEncoder, LabelEncoder
-from sklearn.impute import SimpleImputer, KNNImputer
+from sklearn.impute import SimpleImputer, KNNImputer,IterativeImputer
 from sklearn.metrics import make_scorer, r2_score, mean_absolute_error, mean_squared_error
 from sklearn.model_selection import BaseCrossValidator
 import logging
 import sys
-
-
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder, FunctionTransformer
-from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.model_selection import train_test_split
+
 
 
 # Configure logging for the module
@@ -196,26 +193,81 @@ class MLpipeline:
     def set_data(self, df):
         self.df_all = df.copy().reset_index(drop=True)
         self.logger.info(f"[set_data] DataFrame with {len(self.df_all)} rows loaded in pipeline.")
+    
+
 
     def outer_user_split(self):
         """
-        Splits entire users into holdout or known sets.
-        e.g. if HOLDOUT_RATIO=0.2 and we have 50 users, 10 users go to holdout, 40 to 'known'.
+        Splits users into holdout and known sets, ensuring stratification by `STRATIFY_COL`.
+        
+        - Uses user-level stratification based on `n_quest_binned`.
+        - Guarantees exactly `HOLDOUT_RATIO` users go to holdout.
+        
+        Configurable options (`self.cfg.HOLDOUT_DATA_USAGE`):
+            - "all": Use all data from holdout users.
+            - "first_20": Use the first 20% of data per holdout user.
+            - "last_20": Use the last 20% of data per holdout user.
         """
-        unique_users = self.df_all[self.cfg.USER_COL].unique()
+        stratify_col = self.cfg.STRATIFY_COL  # e.g., 'n_quest_binned'
+        holdout_data_usage = self.cfg.HOLDOUT_DATA_USAGE  # One of ["all", "first_20", "last_20"]
+        
+        if stratify_col not in self.df_all.columns:
+            raise ValueError(f"Stratify column '{stratify_col}' not found in dataset!")
+        
+        if holdout_data_usage not in ["all", "first_20", "last_20"]:
+            raise ValueError("HOLDOUT_DATA_USAGE must be one of ['all', 'first_20', 'last_20'].")
+    
+        # ✅ Ensure stratify column is categorical
+        self.df_all[stratify_col] = self.df_all[stratify_col].astype("category")
+    
+        # ✅ Aggregate stratify values per user
+        user_stratify_values = self.df_all[[self.cfg.USER_COL, stratify_col]].drop_duplicates()
+    
+        # ✅ Compute exact holdout size
+        unique_users = user_stratify_values[self.cfg.USER_COL].values
+        stratify_values = user_stratify_values[stratify_col].values
+    
         n_users = len(unique_users)
         n_holdout = int(np.floor(n_users * self.cfg.HOLDOUT_RATIO))
+    
+        # ✅ Ensure exact holdout size by manual selection
+        if n_holdout >= 2:
+            users_train, users_holdout = train_test_split(
+                unique_users, test_size=n_holdout,  # Use absolute count instead of ratio
+                stratify=stratify_values, random_state=self.random_state
+            )
+        else:
+            raise ValueError(f"Too few users to stratify with holdout ratio {self.cfg.HOLDOUT_RATIO}.")
+    
+        # ✅ Create masks for holdout and known users
+        mask_holdout = self.df_all[self.cfg.USER_COL].isin(users_holdout)
+        df_holdout_all = self.df_all[mask_holdout].copy().reset_index(drop=True)
+        df_known = self.df_all[~mask_holdout].copy().reset_index(drop=True)
+    
+        # ✅ Handle different holdout data usage strategies
+        if holdout_data_usage == "all":
+            self.df_holdout = df_holdout_all  # Keep all data
+        else:
+            holdout_subsets = []
+            for _, group in df_holdout_all.groupby(self.cfg.USER_COL):
+                group = group.sort_values(by=self.cfg.TIME_COL)  # Sort by time
+    
+                if holdout_data_usage == "first_20":
+                    subset = group.iloc[:int(0.2 * len(group))]  # First 20%
+                elif holdout_data_usage == "last_20":
+                    subset = group.iloc[-int(0.2 * len(group)):]  # Last 20%
+    
+                holdout_subsets.append(subset)
+    
+            self.df_holdout = pd.concat(holdout_subsets, axis=0).reset_index(drop=True)
+    
+        self.df_known = df_known
+    
+        self.logger.info(f"[outer_user_split] Holdout Users: {len(users_holdout)}/{n_users} | "
+                         f"Holdout Strategy: {holdout_data_usage} | "
+                         f"Holdout Size: {len(self.df_holdout)} rows.")
 
-        rng = np.random.default_rng(self.random_state)
-        shuffled = rng.permutation(unique_users)
-        holdout_users = set(shuffled[:n_holdout])
 
-        mask_holdout = self.df_all[self.cfg.USER_COL].isin(holdout_users)
-        self.df_holdout = self.df_all[mask_holdout].copy().reset_index(drop=True)
-        self.df_known = self.df_all[~mask_holdout].copy().reset_index(drop=True)
-
-        self.logger.info(f"[outer_user_split] Held out {n_holdout}/{n_users} users; "
-                         f"holdout size: {len(self.df_holdout)} rows.")
 
     def inner_time_split(self):
         """
@@ -309,8 +361,11 @@ class MLpipeline:
     
         # Add MERF-specific columns for MERF pipelines
         if "MERF" in pipeline_name:
-            feature_cols.extend(self.cfg.merf_cols)  # Assuming self.cfg.merf_cols = ['customer', 'intercept']
-        print(feature_cols)
+            feature_cols.extend(self.cfg.merf_cols)  
+        elif "PerUser" in pipeline_name:
+            feature_cols.append(self.cfg.USER_COL)  # ✅ Append instead of extend
+        print("features:",list(set(feature_cols)), flush=True)
+
             
         # Return unique feature columns (no duplicates)
         return list(set(feature_cols))
@@ -322,8 +377,11 @@ class MLpipeline:
         Passes only 'intercept' through without transformation.
         """
         # Define imputers based on configuration
+    
         if self.cfg.IMPUTE_STRATEGY == "knn":
             imputer_numeric = KNNImputer(n_neighbors=5)
+        elif self.cfg.IMPUTE_STRATEGY == "iterative":
+            imputer_numeric = IterativeImputer(max_iter=10, random_state=42)
         else:
             imputer_numeric = SimpleImputer(strategy=self.cfg.IMPUTE_STRATEGY)
     
@@ -365,6 +423,9 @@ class MLpipeline:
         if "MERF" in pipeline_name:
             transformers.append(("customer_pass", "passthrough", ["customer"]))
             transformers.append(("intercept_pass", "passthrough", ["intercept"]))
+        elif "PerUser" in pipeline_name:
+            transformers.append(("customer_pass", "passthrough", ["customer"]))
+
     
         # Instantiate the ColumnTransformer
         column_transformer = ColumnTransformer(
@@ -377,6 +438,55 @@ class MLpipeline:
         ])
     
         return preprocessor
+
+    def evaluate_holdout_all(self, results_timebased):
+        """
+        Evaluate trained models on the holdout users.
+        
+        Parameters
+        ----------
+        results_timebased : list
+            List of trained models and their results from `run()`.
+        
+        Returns
+        -------
+        holdout_results : list
+            Evaluation results for the holdout set.
+        """
+        holdout_results = []
+    
+        # Ensure holdout data is available
+        if self.df_holdout is None or len(self.df_holdout) == 0:
+            self.logger.warning("No holdout data available for evaluation.")
+            return holdout_results
+    
+        for model_result in results_timebased:  # ✅ Use results_timebased
+            pipeline_name = model_result["pipeline_name"]  # ✅ Get pipeline name
+            feature_cols = self._get_feature_cols(pipeline_name)  # ✅ Get correct features
+    
+            X_holdout = self.df_holdout[feature_cols]
+            y_holdout = self.df_holdout[self.cfg.LABEL_COL]
+    
+            model = model_result["best_estimator"]
+    
+            try:
+                y_pred = model.predict(X_holdout)
+                scores = {
+                    "r2": r2_score(y_holdout, y_pred),
+                    "mae": mean_absolute_error(y_holdout, y_pred),
+                    "rmse": np.sqrt(mean_squared_error(y_holdout, y_pred))
+                }
+                self.logger.info(f"[{pipeline_name}] Holdout Scores: {scores}")
+    
+                holdout_results.append({
+                    "pipeline_name": pipeline_name,
+                    "holdout_scores": scores
+                })
+            except Exception as e:
+                self.logger.error(f"[{pipeline_name}] Error evaluating holdout set: {e}")
+                continue
+    
+        return holdout_results
 
 
     ##########################################################################
@@ -409,18 +519,21 @@ class MLpipeline:
     
         for pipeline_name, (raw_pipeline, param_grid) in pipeline_grid_dict.items():
             self.logger.info(f"\n[run] Starting pipeline: {pipeline_name}")
+        
             feature_cols = self._get_feature_cols(pipeline_name)
             self.logger.debug(f"[{pipeline_name}] Feature columns selected: {feature_cols}")
-    
-            X_train = train_df[feature_cols].copy()  # Copy to avoid modifying the original
+        
+            X_train = train_df[feature_cols]
             y_train = train_df[self.cfg.LABEL_COL]
-            groups = train_df[self.cfg.USER_COL]
-            print(X_train.shape)
-    
-            preprocessor = self.build_preprocessor(feature_cols, pipeline_name=pipeline_name)
-            combined_pipeline = Pipeline([("preprocessor", preprocessor)] + list(raw_pipeline.steps))
+            y_train.index = train_df[self.cfg.USER_COL].values  # Set user_column as index
 
-            self.logger.debug(f"[{pipeline_name}] Starting GridSearchCV (forward-chaining)...")
+            groups = train_df[self.cfg.USER_COL]
+        
+            preprocessor = self.build_preprocessor(feature_cols, pipeline_name=pipeline_name)
+        
+            combined_pipeline = Pipeline([("preprocessor", preprocessor),] + list(raw_pipeline.steps))
+        
+            # ✅ Grid Search CV with correct label scaling
             gs = GridSearchCV(
                 estimator=combined_pipeline,
                 param_grid=param_grid,
@@ -430,7 +543,7 @@ class MLpipeline:
                 n_jobs=self.cfg.N_JOBS,
                 error_score='raise'
             )
-    
+        
             try:
                 self.logger.info(f"[{pipeline_name}] Fitting GridSearchCV.")
                 gs.fit(X_train, y_train, groups=groups)
@@ -445,31 +558,50 @@ class MLpipeline:
                 self.logger.error(f"[{pipeline_name}] [ERROR] GridSearchCV failed:")
                 self.logger.error(e)
                 print("Full traceback:")
-                traceback.print_exc()  # Shows exactly where the error happened!
-                raise
-    
+                traceback.print_exc()
+                continue
+        
+            # ✅ Prepare test data
             X_inner_test = self.df_inner_test[feature_cols].copy()
             y_inner_test = self.df_inner_test[self.cfg.LABEL_COL]
-            test_predictions = gs.predict(X_inner_test)
+            groups_test = self.df_inner_test[self.cfg.USER_COL]
+        
+            # ✅ Prediction Handling with inverse transformation for GTTR models
+            try:
+                best_estimator = gs.best_estimator_
+
+                y_pred = best_estimator.predict(X_inner_test)
+        
+            except Exception as e:
+                self.logger.error(f"[{pipeline_name}] Error during prediction:")
+                self.logger.error(e)
+                continue
+        
+            # ✅ Calculate test scores
             try:
                 test_scores = {
-                    "r2": r2_score(y_inner_test, test_predictions),
-                    "mae": mean_absolute_error(y_inner_test, test_predictions),
-                    "rmse": np.sqrt(mean_squared_error(y_inner_test, test_predictions)),
+                    "r2": r2_score(y_inner_test, y_pred),
+                    "mae": mean_absolute_error(y_inner_test, y_pred),
+                    "rmse": np.sqrt(mean_squared_error(y_inner_test, y_pred)),
                 }
                 self.logger.info(f"[{pipeline_name}] Inner Test Scores: {test_scores}")
-                
+            
             except Exception as e:
                 self.logger.error(f"[{pipeline_name}] Error during evaluation of inner test set:")
                 self.logger.error(e)
                 continue
-    
+        
+            # Store results
             results_timebased.append({
                 "pipeline_name": pipeline_name,
                 "best_cv_score": gs.best_score_,
                 "inner_test_scores": test_scores,
                 "best_estimator": gs.best_estimator_,
             })
-    
+        
         self.logger.info("[run] ML pipeline run method completed.")
-        return results_timebased
+
+        # ✅ Evaluate models on holdout users
+        holdout_results = self.evaluate_holdout_all(results_timebased)
+    
+        return results_timebased, holdout_results  # ✅ Now returns holdout evaluation too
