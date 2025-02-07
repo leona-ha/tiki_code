@@ -14,6 +14,8 @@ from sklearn.feature_selection import VarianceThreshold
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.model_selection import train_test_split
+import scipy.stats as st
+
 
 
 
@@ -34,20 +36,20 @@ logger = logging.getLogger("MLpipelineConfig")
 
 
 def mae_scorer(y_true, y_pred):
-    """Return negative MAE (so higher is better, but we actually want lower MAE)."""
+    """Return negative MAE (since scikit-learn expects higher = better)."""
     return -mean_absolute_error(y_true, y_pred)
-
 
 def rmse_scorer(y_true, y_pred):
     """Return negative RMSE."""
     return -np.sqrt(mean_squared_error(y_true, y_pred))
-
 
 def r2_custom_scorer(y_true, y_pred):
     """Return R^2 as is (higher is better)."""
     return r2_score(y_true, y_pred)
 
 
+
+# We collect these into a dictionary recognized by scikit-learn:
 custom_scorers = {
     "mae": make_scorer(mae_scorer, greater_is_better=False),
     "rmse": make_scorer(rmse_scorer, greater_is_better=False),
@@ -55,10 +57,32 @@ custom_scorers = {
 }
 
 
+
+
+class DebugColumnsTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, name="DebugColumns"):
+        self.name = name
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        if isinstance(X, pd.DataFrame):
+            print(f"[{self.name}] Shape: {X.shape}")
+            print(f"[{self.name}] Columns: {X.columns.tolist()}")
+            duplicates = X.columns[X.columns.duplicated()].tolist()
+            if duplicates:
+                print(f"[{self.name}] Duplicate columns detected: {duplicates}")
+            else:
+                print(f"[{self.name}] No duplicate columns.")
+        else:
+            print(f"[{self.name}] Array shape: {X.shape}")
+        return X
+
+
 ##############################################################################
 # FORWARD CHAINING CROSS-VALIDATOR
 ##############################################################################
-
 
 class PerUserForwardChainingCV(BaseCrossValidator):
     """
@@ -149,8 +173,6 @@ class PerUserForwardChainingCV(BaseCrossValidator):
 
             logger.debug(f"Fold {i}: train_size={len(train_idx)}, test_size={len(test_idx)}")
             yield train_idx, test_idx
-
-
 
 
 
@@ -362,13 +384,16 @@ class MLpipeline:
         # Add MERF-specific columns for MERF pipelines
         if "MERF" in pipeline_name:
             feature_cols.extend(self.cfg.merf_cols)  
-        elif "PerUser" in pipeline_name:
-            feature_cols.append(self.cfg.USER_COL)  # ✅ Append instead of extend
+        elif ("PerUser" in pipeline_name) or ("Embeddings" in pipeline_name):
+            feature_cols.append(self.cfg.USER_COL)
+
         print("features:",list(set(feature_cols)), flush=True)
 
             
         # Return unique feature columns (no duplicates)
         return list(set(feature_cols))
+
+
 
     
     def build_preprocessor(self, feature_cols, pipeline_name):
@@ -393,6 +418,8 @@ class MLpipeline:
     
         # Get feature groups
         skewed_cols, non_skewed_cols, cat_cols = self.assign_feature_columns(feature_cols, pipeline_name)
+        actual_fixed_categories = [self.cfg.categorical_features_categories[col] for col in cat_cols]
+
     
         # Define pipelines for different feature types
         skewed_numeric_pipeline = Pipeline([
@@ -407,11 +434,10 @@ class MLpipeline:
             ("varth", VarianceThreshold()),  # Apply VarianceThreshold here
             ("scale", scaler)
         ])
-    
         categorical_pipeline = Pipeline([
-            ("onehot", OneHotEncoder(handle_unknown="ignore"))
+            ("onehot", OneHotEncoder(categories=actual_fixed_categories, handle_unknown="ignore"))
         ])
-    
+            
         # Initialize list of transformers
         transformers = [
             ("skewed_num", skewed_numeric_pipeline, skewed_cols),
@@ -423,7 +449,8 @@ class MLpipeline:
         if "MERF" in pipeline_name:
             transformers.append(("customer_pass", "passthrough", ["customer"]))
             transformers.append(("intercept_pass", "passthrough", ["intercept"]))
-        elif "PerUser" in pipeline_name:
+      
+        elif ("PerUser" in pipeline_name)or ("Embeddings" in pipeline_name):
             transformers.append(("customer_pass", "passthrough", ["customer"]))
 
     
@@ -493,17 +520,17 @@ class MLpipeline:
     # Main run: cross-validation + final refit
     ##########################################################################
 
-    def run(self, pipeline_grid_dict, task_type="regression", scoring=None, refit="mae", do_final_refit=True):
+    def run(self, pipeline_grid_dict, task_type="regression", scoring=custom_scorers, refit="mae", do_final_refit=True):
         self.logger.info("[run] Starting the ML pipeline run method.")
     
-        # If no scoring is provided, use standard metrics
         if scoring is None:
+            # Provide a dictionary recognized by scikit-learn
             scoring = {
-                "r2": "r2",                        # Standard R^2
-                "mae": "neg_mean_absolute_error",   # Negative MAE
-                "rmse": "neg_root_mean_squared_error",  # Negative RMSE
-            }
-    
+                "mae": "neg_mean_absolute_error",
+                "rmse": "neg_root_mean_squared_error",
+                "r2": "r2"}
+
+
         results_timebased = []
     
         # 1) Create the cross-validator on df_inner_train
@@ -529,10 +556,9 @@ class MLpipeline:
 
             groups = train_df[self.cfg.USER_COL]
         
-            preprocessor = self.build_preprocessor(feature_cols, pipeline_name=pipeline_name)
-        
+            preprocessor = self.build_preprocessor(feature_cols, pipeline_name=pipeline_name)    
             combined_pipeline = Pipeline([("preprocessor", preprocessor),] + list(raw_pipeline.steps))
-        
+           
             # ✅ Grid Search CV with correct label scaling
             gs = GridSearchCV(
                 estimator=combined_pipeline,

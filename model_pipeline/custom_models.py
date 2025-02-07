@@ -13,6 +13,17 @@ from sklearn.utils.validation import check_is_fitted
 
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.metrics import r2_score
+from sklearn.preprocessing import LabelEncoder
+
+import tensorflow as tf
+from tensorflow.keras.layers import Input, Embedding, Dense, Flatten, Concatenate
+from tensorflow.keras.models import Model
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.layers import Input, Dense, Flatten, Embedding, Concatenate, Lambda
+from tensorflow.keras.models import Model
+from sklearn.base import BaseEstimator, RegressorMixin
+
 
 
 
@@ -64,9 +75,7 @@ class PerUserInterceptModel(BaseEstimator, RegressorMixin):
             Name of detected 'intercept' column.
         """
         X = X.copy()  # Avoid modifying the original DataFrame
-    
-        # 🔍 **Step 1: Detect 'customer' column (contains letters + exactly 4-character strings)**
-        cluster_col = None
+            cluster_col = None
         for col in X.columns:
             if X[col].dtype == "object" and X[col].apply(lambda v: isinstance(v, str) and len(v) == 4).all():
                 cluster_col=col
@@ -425,6 +434,157 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
                 max_iterations=self.max_iterations
             )
         return self
+
+##############################################################################
+# PersonEmbedding
+##############################################################################
+
+
+class SplitFeaturesTransformer(BaseEstimator, TransformerMixin):
+    """
+    Splits a DataFrame into a list for a Keras model that expects two inputs:
+      - sensor_input: numeric sensor features (all columns except the user column)
+      - user_input: encoded user IDs
+
+    If sensor_feature_cols is not provided, it will automatically select all columns
+    except the user column. This transformer uses a heuristic _detect_user_column
+    if the specified user_col is not actually found in X.columns.
+    """
+    def __init__(self, sensor_feature_cols=None, user_col=None):
+        self.sensor_feature_cols = sensor_feature_cols  # optional; if None, auto-detect
+        self.user_col = user_col
+        self.encoder = LabelEncoder()
+        
+    def _detect_user_column(self, X):
+        """
+        Attempts to detect candidate user columns using a heuristic:
+          - Look for a column whose values are all strings of exactly 4 characters
+            and containing at least one alphabetic character.
+        If multiple candidate columns are detected, it prints a warning and returns the first one.
+        """
+        # Find all columns matching the heuristic
+        candidate_cols = [
+            col for col in X.columns 
+            if X[col].apply(lambda v: isinstance(v, str) and len(v) == 4 and any(c.isalpha() for c in v)).all()
+        ]
+        
+        if not candidate_cols:
+            return None
+        elif len(candidate_cols) > 1:
+            print(f"[DEBUG] Multiple user columns detected: {candidate_cols}. Using '{candidate_cols[0]}' as user column.")
+            return candidate_cols[0]
+        else:
+            return candidate_cols[0]
+
+
+    def _detect_sensor_columns(self, X):
+        """Return all columns except the user column (which might be numeric or string)."""
+        return [col for col in X.columns if col != self.user_col]
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
+
+        # 1) If the user_col isn't found in X.columns, try to detect it.
+        if self.user_col not in X.columns:
+            detected = self._detect_user_column(X)
+            if detected is None:
+                raise KeyError(f"[ERROR] User column '{self.user_col}' not found or detected.")
+            self.user_col = detected
+
+        # 2) Now that we know the user column, detect or filter out sensor columns
+        if self.sensor_feature_cols is None:
+            # auto-detect => all columns except the user column
+            self.sensor_feature_cols = self._detect_sensor_columns(X)
+        else:
+            # even if sensor_feature_cols is given, remove the user column if present
+            self.sensor_feature_cols = [c for c in self.sensor_feature_cols if c != self.user_col]
+
+
+        # 3) Fit the LabelEncoder on user column
+        self.encoder.fit(X[self.user_col])
+        return self
+
+    def transform(self, X):
+        X = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
+        
+        sensor_data = X[self.sensor_feature_cols].astype(float).values
+        user_ids = self.encoder.transform(X[self.user_col])
+        user_data = user_ids.reshape(-1, 1).astype(float)
+        
+        X_merged = np.hstack([sensor_data, user_data]).astype(float)
+        
+        return X_merged
+
+
+
+
+
+# --- NEW: FFNN Model with Embedding Layer ---
+
+
+
+class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
+    """
+    A custom scikit-learn estimator wrapping a Keras FFNN with user embeddings.
+    """
+    def __init__(self,
+                 sensor_feature_dim=58,
+                 num_users=158,
+                 embedding_dim=32,
+                 hidden_units=(64, 32),
+                 epochs=20,
+                 batch_size=32,
+                 verbose=0):
+        self.sensor_feature_dim = sensor_feature_dim
+        self.num_users = num_users
+        self.embedding_dim = embedding_dim
+        self.hidden_units = hidden_units
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.verbose = verbose
+        self.model_ = None
+
+    def _build_model(self):
+        main_input = Input(shape=(self.sensor_feature_dim+1,), name="merged_input")
+
+        # The first sensor_feature_dim columns: sensor data
+        sensor_data = Lambda(lambda x: x[:, :self.sensor_feature_dim])(main_input)
+        # The last column => user ID
+        user_ids = Lambda(lambda x: tf.cast(x[:, self.sensor_feature_dim], tf.int32))(main_input)
+
+        # Embedding layer
+        user_embedding = Embedding(input_dim=self.num_users,
+                                   output_dim=self.embedding_dim)(user_ids)
+        user_embedding = Flatten()(user_embedding)
+
+        x = Concatenate()([sensor_data, user_embedding])
+        for units in self.hidden_units:
+            x = Dense(units, activation="relu")(x)
+        output = Dense(1, activation="linear")(x)
+
+        model = Model(inputs=main_input, outputs=output)
+        # Critically: keep a valid loss for Keras training
+        model.compile(
+            optimizer="adam",
+            loss="mean_squared_error",
+            metrics=[]  # no explicit metrics => no "loss" confusion for scikit-learn
+        )
+        return model
+
+    def fit(self, X, y):
+        self.model_ = self._build_model()
+        self.model_.fit(
+            X, y,
+            epochs=self.epochs,
+            batch_size=self.batch_size,
+            verbose=self.verbose
+        )
+        return self
+
+    def predict(self, X):
+        # .predict returns a 2D array, shape (n_samples, 1)
+        # we flatten to shape (n_samples,)
+        return self.model_.predict(X, verbose=self.verbose).ravel()
 
 
 

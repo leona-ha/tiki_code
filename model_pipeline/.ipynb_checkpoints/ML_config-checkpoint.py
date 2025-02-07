@@ -15,10 +15,14 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.compose import TransformedTargetRegressor, ColumnTransformer
 from merf.merf import MERF
-from custom_models import MERFWrapperEmbed, GlobalInterceptModel, PerUserInterceptModel, PerUserLabelScaler, PerUserTransformedTargetRegressor
+from custom_models import MERFWrapperEmbed, GlobalInterceptModel, PerUserInterceptModel, PerUserLabelScaler
+from custom_models import PerUserTransformedTargetRegressor, SplitFeaturesTransformer
 # Enable experimental features in scikit-learn
 from sklearn.experimental import enable_iterative_imputer  # ✅ Must be imported first
 from sklearn.impute import IterativeImputer  # ✅ Now you can import it
+
+from custom_models import KerasFFNNRegressor  # your new custom class
+
 
 
 import logging
@@ -76,11 +80,26 @@ class Config:
     categorical_features = [
         'weekday', 'prior_treatment_description_simple', 'quest_create_hour', 'season', 'time_of_day', 'employability_description_simple'
     ]
+    categorical_features_categories = {
+    'weekday': ['Friday', 'Monday', 'Saturday', 'Sunday', 'Thursday', 'Tuesday', 'Wednesday'],
+    'prior_treatment_description_simple': ['no prior treatment', 'prior inpatient', 'prior psychotherapy'],
+    'quest_create_hour': [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+    'season': ['Fall', 'Spring', 'Summer', 'Winter'],
+    'time_of_day': ['Afternoon', 'Early Morning', 'Evening', 'Morning', 'Night'],
+    'employability_description_simple': ['no', 'yes']
+}
+
     person_static_features = [
         'age', 'somatic_problems', 'psychotropic','employability_description_simple',
         'prior_treatment_description_simple', 'ema_smartphone'
     ]
     merf_cols = ["customer","intercept"]
+    passive_cols = ['hr_mean', 'hr_min', 'hr_max', 'hr_std', 'hr_zone_resting',
+        'hr_zone_moderate', 'hr_zone_vigorous', 'n_steps', 'n_GPS',
+        'total_distance_km', 'at_home_minute', 'time_in_transition_minutes',
+        'time_stationary_minutes', 'activity_102_minutes', 'activity_103_minutes',
+        'activity_104_minutes', 'activity_105_minutes', 'activity_106_minutes',
+        'activity_107_minutes', 'sunshine_duration', 'precipitation_hours', 'apparent_temperature_mean', 'weekend', 'weekday','quest_create_hour', 'season', 'time_of_day']
 
     # 5) Feature Types (used during preprocessing)
     FEATURE_TYPES = {
@@ -125,6 +144,18 @@ class Config:
     SAVE_MODELS = True
     DEBUG = False
 
+
+
+embedding_model = KerasFFNNRegressor(
+    sensor_feature_dim=57,
+    num_users=158,
+    embedding_dim=32,
+    hidden_units=(64, 32),
+    epochs=20,
+    batch_size=32,
+    verbose=0
+)
+
 #################################
 # Define Custom Transformers
 #################################
@@ -148,7 +179,45 @@ Regression_model_settings = {
     # =========================
     #  PER-USER STANDARDIZED MODELS
     # =========================
-
+    
+    "FFNN_with_Embeddings_nonscaled": (
+        Pipeline([
+            ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)),
+            ("keras_model", embedding_model)
+        ]),
+        {
+            "keras_model__embedding_dim": [32, 64],
+            "keras_model__hidden_units": [[64, 32], [128, 64]]
+        }
+    ),
+    "FFNN_with_Embeddings_groupscaled": (
+        Pipeline([
+            ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)),
+            ("keras_model", TransformedTargetRegressor(
+                regressor=embedding_model,
+                transformer=StandardScaler()
+            ))
+        ]),
+        {
+            "keras_model__regressor__embedding_dim": [32, 64],
+            "keras_model__regressor__hidden_units": [[64, 32], [128, 64]]
+        }
+    ),
+    "FFNN_with_Embeddings_PerUserscaled": (
+        Pipeline([
+            ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)),
+            ("keras_model", PerUserTransformedTargetRegressor(
+                regressor=embedding_model,
+                transformer=PerUserLabelScaler(),
+                user_col=Config.USER_COL,
+                drop_user=False  # Keep user input for the embedding layer!
+            ))
+        ]),
+        {
+            "keras_model__regressor__embedding_dim": [32, 64],
+            "keras_model__regressor__hidden_units": [[64, 32], [128, 64]]
+        }
+    ),
     # ---- LINEAR REGRESSION (Per-User Standardized) ---- #
     "LR_without_PS_PerUserscaled": (
         Pipeline([
@@ -287,6 +356,8 @@ Regression_model_settings = {
     #  EXISTING (Non Per-User Standardized) PIPELINES
     # =========================
 
+
+
     # ---- LINEAR REGRESSION (Global Scaling) ---- #
     "LR_without_PS_groupscaled": (
         Pipeline([
@@ -405,7 +476,6 @@ Regression_model_settings = {
         }
     ),
 
-    # ---- LINEAR REGRESSION (No Scaling) ---- #
     "LR_without_PS_nonscaled": (
         Pipeline([
             ("model_LR", LinearRegression())
