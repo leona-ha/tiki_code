@@ -7,6 +7,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 
 import numpy as np
 import pandas as pd
+import random
 
 from sklearn.feature_selection import VarianceThreshold
 from sklearn.preprocessing import StandardScaler, OrdinalEncoder
@@ -145,24 +146,42 @@ class Config:
     DEBUG = False
 
 
-
 embedding_model = KerasFFNNRegressor(
-    sensor_feature_dim=57,
-    num_users=158,
-    embedding_dim=32,
-    hidden_units=(64, 32),
-    epochs=20,
-    batch_size=32,
-    verbose=0
+            sensor_feature_dim=None,  # Let the model infer: input will be (n_features, ) + user col.
+            num_users=158,
+            embedding_dim=32,
+            hidden_units=(64, 32),
+            epochs=20,
+            batch_size=32,
+            use_embedding=True,
+            verbose=0
 )
+plain_ffnn_model = KerasFFNNRegressor(
+            sensor_feature_dim=None,  # Will be inferred from X (all columns are sensor features)
+            num_users=158,            # Irrelevant when use_embedding=False
+            embedding_dim=32,         # Ignored when use_embedding is False
+            hidden_units=(64, 32),
+            epochs=20,
+            batch_size=32,
+            use_embedding=False,
+            verbose=0
+)
+
+
+inner_ffnn_pipeline = Pipeline([                  
+    ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)), 
+    ("keras_model", embedding_model)
+])
+
 
 #################################
 # Define Custom Transformers
 #################################
 
-
 Regression_model_settings = {
-    # ---- BASELINE MODELS ---- #
+    #################################
+    # 1. BASELINE MODELS
+    #################################
     "Global_Intercept": (
         Pipeline([
             ("basemodel_global", GlobalInterceptModel())
@@ -176,190 +195,134 @@ Regression_model_settings = {
         {}
     ),
 
-    # =========================
-    #  PER-USER STANDARDIZED MODELS
-    # =========================
+    #################################
+    # 2. NON-SCALED MODELS
+    #    (i.e. models that use the original target without any scaling)
+    #################################
+    # FFNN variants (embeddings that do not transform the target)
     
+    # Linear Regression
+    "LR_nonscaled": (
+        Pipeline([
+            ("model_LR", LinearRegression())
+        ]),
+        {
+            "model_LR__fit_intercept": [True, False]
+        }
+    ),
+    "LR_with_PS_nonscaled": (
+        Pipeline([
+            ("model_LRPS", LinearRegression())
+        ]),
+        {
+            "model_LRPS__fit_intercept": [True, False]
+        }
+    ),
+    # Random Forest
+    "RF_nonscaled": (
+        Pipeline([
+            ("model_TTR", TransformedTargetRegressor(
+                regressor=RandomForestRegressor(random_state=42)
+            ))
+        ]),
+        {
+            "model_TTR__regressor__n_estimators": [100, 200, 300],
+            "model_TTR__regressor__max_depth": [10, 20, None],
+            "model_TTR__regressor__min_samples_split": [2, 5, 10],
+            "model_TTR__regressor__max_features": ['sqrt', 'log2']
+        }
+    ),
+    "RF_with_PS_nonscaled": (
+        Pipeline([
+            ("model_TTR", TransformedTargetRegressor(
+                regressor=RandomForestRegressor(random_state=42)
+            ))
+        ]),
+        {
+            "model_TTR__regressor__n_estimators": [100, 200, 300],
+            "model_TTR__regressor__max_depth": [10, 20, None],
+            "model_TTR__regressor__min_samples_split": [2, 5, 10],
+            "model_TTR__regressor__max_features": ['sqrt', 'log2']
+        }
+    ),
+    "FFNN_nonscaled": (
+        Pipeline([
+            ("keras_model", TransformedTargetRegressor(
+                regressor=plain_ffnn_model
+            ))
+        ]),
+        {
+            "keras_model__regressor__hidden_units": [(64, 32), (128, 64), (128, 64, 32)],
+            "keras_model__regressor__batch_size": [32, 64],
+            "keras_model__regressor__learning_rate": [1e-3, 1e-4],
+            "keras_model__regressor__dropout_rate": [0.25, 0.5],
+        }
+    ),
+
+    "FFNN_with_PS_nonscaled": (
+        Pipeline([
+            ("keras_model", TransformedTargetRegressor(
+                regressor=plain_ffnn_model
+            ))
+        ]),
+        {
+            "keras_model__regressor__hidden_units": [(64, 32), (128, 64), (128, 64, 32)],
+            "keras_model__regressor__batch_size": [32, 64],
+            "keras_model__regressor__learning_rate": [1e-3, 1e-4],
+            "keras_model__regressor__dropout_rate": [0.25, 0.5],
+        }
+    ),
+    # MERF models (non-scaled)
+    "MERF_nonscaled": (
+        Pipeline([
+            ("model_MERF", TransformedTargetRegressor(
+                regressor=MERFWrapperEmbed(
+                    gll_early_stop_threshold=0.01,
+                    max_iterations=10,
+                    rf__n_estimators=100
+                )
+            ))
+        ]),
+        {
+            "model_MERF__regressor__max_iterations": [10, 15],
+            "model_MERF__regressor__rf__n_estimators": [50, 100]
+        }
+    ),
+    "MERF_with_PS_nonscaled": (
+        Pipeline([
+            ("model_MERF", TransformedTargetRegressor(
+                regressor=MERFWrapperEmbed(
+                    gll_early_stop_threshold=0.01,
+                    max_iterations=10,
+                    rf__n_estimators=100
+                )
+            ))
+        ]),
+        {
+            "model_MERF__regressor__max_iterations": [10, 15],
+            "model_MERF__regressor__rf__n_estimators": [50, 100]
+        }
+    ),
     "FFNN_with_Embeddings_nonscaled": (
         Pipeline([
             ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)),
             ("keras_model", embedding_model)
         ]),
         {
-            "keras_model__embedding_dim": [32, 64],
-            "keras_model__hidden_units": [[64, 32], [128, 64]]
-        }
-    ),
-    "FFNN_with_Embeddings_groupscaled": (
-        Pipeline([
-            ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)),
-            ("keras_model", TransformedTargetRegressor(
-                regressor=embedding_model,
-                transformer=StandardScaler()
-            ))
-        ]),
-        {
-            "keras_model__regressor__embedding_dim": [32, 64],
-            "keras_model__regressor__hidden_units": [[64, 32], [128, 64]]
-        }
-    ),
-    "FFNN_with_Embeddings_PerUserscaled": (
-        Pipeline([
-            ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)),
-            ("keras_model", PerUserTransformedTargetRegressor(
-                regressor=embedding_model,
-                transformer=PerUserLabelScaler(),
-                user_col=Config.USER_COL,
-                drop_user=False  # Keep user input for the embedding layer!
-            ))
-        ]),
-        {
-            "keras_model__regressor__embedding_dim": [32, 64],
-            "keras_model__regressor__hidden_units": [[64, 32], [128, 64]]
-        }
-    ),
-    # ---- LINEAR REGRESSION (Per-User Standardized) ---- #
-    "LR_without_PS_PerUserscaled": (
-        Pipeline([
-            ("model_TTR", PerUserTransformedTargetRegressor(
-                regressor=LinearRegression(),
-                transformer=PerUserLabelScaler(),
-                user_col=Config.USER_COL,  # e.g., "customer"
-                drop_user=True            # Drop user column (only used for scaling)
-            ))
-        ]),
-        {
-            "model_TTR__regressor__fit_intercept": [True, False]
-        }
-    ),
-    "LR_with_PS_PerUserscaled": (
-        Pipeline([
-            ("model_TTR", PerUserTransformedTargetRegressor(
-                regressor=LinearRegression(),
-                transformer=PerUserLabelScaler(),
-                user_col=Config.USER_COL,
-                drop_user=True
-            ))
-        ]),
-        {
-            "model_TTR__regressor__fit_intercept": [True, False]
+            "keras_model__embedding_dim": [16, 32, 64, 128],
+            "keras_model__hidden_units": [(64, 32), (128, 64), (128, 64, 32)],
+            "keras_model__batch_size": [32, 64],
         }
     ),
 
-    # ---- RANDOM FOREST (Per-User Standardized) ---- #
-    "RF_without_PS_PerUserscaled": (
-        Pipeline([
-            ("model_TTR", PerUserTransformedTargetRegressor(
-                regressor=RandomForestRegressor(random_state=42),
-                transformer=PerUserLabelScaler(),
-                user_col=Config.USER_COL,
-                drop_user=True
-            ))
-        ]),
-        {
-            "model_TTR__regressor__n_estimators": [100, 200, 300],
-            "model_TTR__regressor__max_depth": [10, 20, None],
-            "model_TTR__regressor__min_samples_split": [2, 5, 10],
-            "model_TTR__regressor__max_features": ['sqrt', 'log2']
-        }
-    ),
-    "RF_with_PS_PerUserscaled": (
-        Pipeline([
-            ("model_TTR", PerUserTransformedTargetRegressor(
-                regressor=RandomForestRegressor(random_state=42),
-                transformer=PerUserLabelScaler(),
-                user_col=Config.USER_COL,
-                drop_user=True
-            ))
-        ]),
-        {
-            "model_TTR__regressor__n_estimators": [100, 200, 300],
-            "model_TTR__regressor__max_depth": [10, 20, None],
-            "model_TTR__regressor__min_samples_split": [2, 5, 10],
-            "model_TTR__regressor__max_features": ['sqrt', 'log2']
-        }
-    ),
-
-    # ---- FFNN (Per-User Standardized) ---- #
-    "FFNN_without_PS_PerUserscaled": (
-        Pipeline([
-            ("model_TTR", PerUserTransformedTargetRegressor(
-                regressor=MLPRegressor(random_state=42, max_iter=2000),
-                transformer=PerUserLabelScaler(),
-                user_col=Config.USER_COL,
-                drop_user=True
-            ))
-        ]),
-        {
-            "model_TTR__regressor__hidden_layer_sizes": [(50,), (100,), (128, 64), (256, 128)],
-            "model_TTR__regressor__alpha": [0.0001, 0.001],
-            "model_TTR__regressor__solver": ["adam"],
-            "model_TTR__regressor__learning_rate_init": [0.001, 0.01, 0.05]
-        }
-    ),
-    "FFNN_with_PS_PerUserscaled": (
-        Pipeline([
-            ("model_TTR", PerUserTransformedTargetRegressor(
-                regressor=MLPRegressor(random_state=42, max_iter=2000),
-                transformer=PerUserLabelScaler(),
-                user_col=Config.USER_COL,
-                drop_user=True
-            ))
-        ]),
-        {
-            "model_TTR__regressor__hidden_layer_sizes": [(50,), (100,), (128, 64), (256, 128)],
-            "model_TTR__regressor__alpha": [0.0001, 0.001],
-            "model_TTR__regressor__solver": ["adam"],
-            "model_TTR__regressor__learning_rate_init": [0.001, 0.01, 0.05]
-        }
-    ),
-
-    # ---- MERF (Per-User Standardized) ---- #
-    "MERF_without_PS_PerUserscaled": (
-        Pipeline([
-            ("model_MERF", PerUserTransformedTargetRegressor(
-                regressor=MERFWrapperEmbed(
-                    gll_early_stop_threshold=0.01,
-                    max_iterations=10,
-                    rf__n_estimators=100
-                ),
-                transformer=PerUserLabelScaler(),
-                user_col=Config.USER_COL,
-                drop_user=False  # KEEP the user column for MERF!
-            ))
-        ]),
-        {
-            "model_MERF__regressor__max_iterations": [10, 15],
-            "model_MERF__regressor__rf__n_estimators": [50, 100]
-        }
-    ),
-    "MERF_with_PS_PerUserscaled": (
-        Pipeline([
-            ("model_MERF", PerUserTransformedTargetRegressor(
-                regressor=MERFWrapperEmbed(
-                    gll_early_stop_threshold=0.01,
-                    max_iterations=10,
-                    rf__n_estimators=100
-                ),
-                transformer=PerUserLabelScaler(),
-                user_col=Config.USER_COL,
-                drop_user=False
-            ))
-        ]),
-        {
-            "model_MERF__regressor__max_iterations": [10, 15],
-            "model_MERF__regressor__rf__n_estimators": [50, 100]
-        }
-    ),
-
-    # =========================
-    #  EXISTING (Non Per-User Standardized) PIPELINES
-    # =========================
-
-
-
-    # ---- LINEAR REGRESSION (Global Scaling) ---- #
-    "LR_without_PS_groupscaled": (
+    #################################
+    # 3. GROUP-SCALED MODELS
+    #    (i.e. models that use a global scaling via StandardScaler)
+    #################################
+    # FFNN variants with embeddings
+    
+    # Linear Regression
+    "LR_groupscaled": (
         Pipeline([
             ("model_TTR", TransformedTargetRegressor(
                 regressor=LinearRegression(),
@@ -381,9 +344,8 @@ Regression_model_settings = {
             "model_TTR__regressor__fit_intercept": [True, False]
         }
     ),
-
-    # ---- RANDOM FOREST (Global Scaling) ---- #
-    "RF_without_PS_groupscaled": (
+    # Random Forest
+    "RF_groupscaled": (
         Pipeline([
             ("model_TTR", TransformedTargetRegressor(
                 regressor=RandomForestRegressor(random_state=42),
@@ -411,39 +373,38 @@ Regression_model_settings = {
             "model_TTR__regressor__max_features": ['sqrt', 'log2']
         }
     ),
-
-    # ---- FFNN (Global Scaling) ---- #
-    "FFNN_without_PS_groupscaled": (
+    "FFNN_groupscaled": (
         Pipeline([
             ("model_TTR", TransformedTargetRegressor(
-                regressor=MLPRegressor(random_state=42, max_iter=2000),
+                regressor=plain_ffnn_model,
                 transformer=StandardScaler()
             ))
         ]),
         {
-            "model_TTR__regressor__hidden_layer_sizes": [(50,), (100,), (128, 64), (256, 128)],
-            "model_TTR__regressor__alpha": [0.0001, 0.001],
-            "model_TTR__regressor__solver": ["adam"],
-            "model_TTR__regressor__learning_rate_init": [0.001, 0.01, 0.05]
+            "model_TTR__regressor__hidden_units": [(64, 32), (128, 64), (128, 64, 32)],
+            "model_TTR__regressor__batch_size": [32, 64],
+            "model_TTR__regressor__learning_rate": [1e-3, 1e-4],
+            "model_TTR__regressor__dropout_rate": [0.25, 0.5],
         }
     ),
+
     "FFNN_with_PS_groupscaled": (
         Pipeline([
             ("model_TTR", TransformedTargetRegressor(
-                regressor=MLPRegressor(random_state=42, max_iter=2000),
+                regressor=plain_ffnn_model,
                 transformer=StandardScaler()
             ))
         ]),
         {
-            "model_TTR__regressor__hidden_layer_sizes": [(50,), (100,), (128, 64), (256, 128)],
-            "model_TTR__regressor__alpha": [0.0001, 0.001],
-            "model_TTR__regressor__solver": ["adam"],
-            "model_TTR__regressor__learning_rate_init": [0.001, 0.01, 0.05]
+            "model_TTR__regressor__hidden_units": [(64, 32), (128, 64), (128, 64, 32)],
+            "model_TTR__regressor__batch_size": [32, 64],
+            "model_TTR__regressor__learning_rate": [1e-3, 1e-4],
+            "model_TTR__regressor__dropout_rate": [0.25, 0.5],
         }
     ),
 
-    # ---- MERF (Global Scaling) ---- #
-    "MERF_without_PS_groupscaled": (
+    # MERF models (global scaling)
+    "MERF_groupscaled": (
         Pipeline([
             ("model_MERF", TransformedTargetRegressor(
                 regressor=MERFWrapperEmbed(
@@ -475,29 +436,60 @@ Regression_model_settings = {
             "model_MERF__regressor__rf__n_estimators": [50, 100]
         }
     ),
+    "FFNN_with_Embeddings_groupscaled": (
+        Pipeline([
+            ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)),
+            ("keras_model", TransformedTargetRegressor(
+                regressor=embedding_model,
+                transformer=StandardScaler()
+            ))
+        ]),
+        {
 
-    "LR_without_PS_nonscaled": (
-        Pipeline([
-            ("model_LR", LinearRegression())
-        ]),
-        {
-            "model_LR__fit_intercept": [True, False]
-        }
-    ),
-    "LR_with_PS_nonscaled": (
-        Pipeline([
-            ("model_LRPS", LinearRegression())
-        ]),
-        {
-            "model_LRPS__fit_intercept": [True, False]
+            "keras_model__regressor_embedding_dim": [16, 32, 64, 128],
+            "keras_model__regressor_hidden_units": [(64, 32), (128, 64), (128, 64, 32)],
+            "keras_model__regressor_batch_size": [32, 64],
         }
     ),
 
-    # ---- RANDOM FOREST (No Scaling) ---- #
-    "RF_without_PS_nonscaled": (
+    #################################
+    # 4. PER-USER SCALED MODELS
+    #    (i.e. models that scale the target per user using PerUserLabelScaler)
+    #################################
+
+    "LR_PerUserscaled": (
         Pipeline([
-            ("model_TTR", TransformedTargetRegressor(
-                regressor=RandomForestRegressor(random_state=42)
+            ("model_TTR", PerUserTransformedTargetRegressor(
+                regressor=LinearRegression(),
+                transformer=PerUserLabelScaler(),
+                user_col=Config.USER_COL,
+                drop_user=True
+            ))
+        ]),
+        {
+            "model_TTR__regressor__fit_intercept": [True, False]
+        }
+    ),
+    "LR_with_PS_PerUserscaled": (
+        Pipeline([
+            ("model_TTR", PerUserTransformedTargetRegressor(
+                regressor=LinearRegression(),
+                transformer=PerUserLabelScaler(),
+                user_col=Config.USER_COL,
+                drop_user=True
+            ))
+        ]),
+        {
+            "model_TTR__regressor__fit_intercept": [True, False]
+        }
+    ),
+    "RF_PerUserscaled": (
+        Pipeline([
+            ("model_TTR", PerUserTransformedTargetRegressor(
+                regressor=RandomForestRegressor(random_state=42),
+                transformer=PerUserLabelScaler(),
+                user_col=Config.USER_COL,
+                drop_user=True
             ))
         ]),
         {
@@ -507,10 +499,13 @@ Regression_model_settings = {
             "model_TTR__regressor__max_features": ['sqrt', 'log2']
         }
     ),
-    "RF_with_PS_nonscaled": (
+    "RF_with_PS_PerUserscaled": (
         Pipeline([
-            ("model_TTR", TransformedTargetRegressor(
-                regressor=RandomForestRegressor(random_state=42)
+            ("model_TTR", PerUserTransformedTargetRegressor(
+                regressor=RandomForestRegressor(random_state=42),
+                transformer=PerUserLabelScaler(),
+                user_col=Config.USER_COL,
+                drop_user=True
             ))
         ]),
         {
@@ -520,44 +515,51 @@ Regression_model_settings = {
             "model_TTR__regressor__max_features": ['sqrt', 'log2']
         }
     ),
-
-    # ---- FFNN (No Scaling) ---- #
-    "FFNN_without_PS_nonscaled": (
+    "FFNN_PerUserscaled": (
         Pipeline([
-            ("model_TTR", TransformedTargetRegressor(
-                regressor=MLPRegressor(random_state=42, max_iter=2000)
+            ("model_TTR", PerUserTransformedTargetRegressor(
+                regressor=plain_ffnn_model,
+                transformer=PerUserLabelScaler(),
+                user_col=Config.USER_COL,
+                drop_user=True
             ))
         ]),
         {
-            "model_TTR__regressor__hidden_layer_sizes": [(50,), (100,), (128, 64), (256, 128)],
-            "model_TTR__regressor__alpha": [0.0001, 0.001],
-            "model_TTR__regressor__solver": ["adam"],
-            "model_TTR__regressor__learning_rate_init": [0.001, 0.01, 0.05]
-        }
-    ),
-    "FFNN_with_PS_nonscaled": (
-        Pipeline([
-            ("model_TTR", TransformedTargetRegressor(
-                regressor=MLPRegressor(random_state=42, max_iter=2000)
-            ))
-        ]),
-        {
-            "model_TTR__regressor__hidden_layer_sizes": [(50,), (100,), (128, 64), (256, 128)],
-            "model_TTR__regressor__alpha": [0.0001, 0.001],
-            "model_TTR__regressor__solver": ["adam"],
-            "model_TTR__regressor__learning_rate_init": [0.001, 0.01, 0.05]
+            "model_TTR__regressor__hidden_units": [(64, 32), (128, 64), (128, 64, 32)],
+            "model_TTR__regressor__batch_size": [32, 64],
+            "model_TTR__regressor__learning_rate": [1e-3, 1e-4],
+            "model_TTR__regressor__dropout_rate": [0.25, 0.5],
         }
     ),
 
-    # ---- MERF (No Scaling) ---- #
-    "MERF_without_nonscaled": (
+    "FFNN_with_PS_PerUserscaled": (
         Pipeline([
-            ("model_MERF", TransformedTargetRegressor(
+            ("model_TTR", PerUserTransformedTargetRegressor(
+                regressor=plain_ffnn_model,
+                transformer=PerUserLabelScaler(),
+                user_col=Config.USER_COL,
+                drop_user=True
+            ))
+        ]),
+        {
+            "model_TTR__regressor__hidden_units": [(64, 32), (128, 64), (128, 64, 32)],
+            "model_TTR__regressor__batch_size": [32, 64],
+            "model_TTR__regressor__learning_rate": [1e-3, 1e-4],
+            "model_TTR__regressor__dropout_rate": [0.25, 0.5],
+        }
+    ),
+
+    "MERF_PerUserscaled": (
+        Pipeline([
+            ("model_MERF", PerUserTransformedTargetRegressor(
                 regressor=MERFWrapperEmbed(
                     gll_early_stop_threshold=0.01,
                     max_iterations=10,
                     rf__n_estimators=100
-                )
+                ),
+                transformer=PerUserLabelScaler(),
+                user_col=Config.USER_COL,
+                drop_user=False
             ))
         ]),
         {
@@ -565,19 +567,40 @@ Regression_model_settings = {
             "model_MERF__regressor__rf__n_estimators": [50, 100]
         }
     ),
-    "MERF_with_PS_nonscaled": (
+    "MERF_with_PS_PerUserscaled": (
         Pipeline([
-            ("model_MERF", TransformedTargetRegressor(
+            ("model_MERF", PerUserTransformedTargetRegressor(
                 regressor=MERFWrapperEmbed(
                     gll_early_stop_threshold=0.01,
                     max_iterations=10,
                     rf__n_estimators=100
-                )
+                ),
+                transformer=PerUserLabelScaler(),
+                user_col=Config.USER_COL,
+                drop_user=False
             ))
         ]),
         {
             "model_MERF__regressor__max_iterations": [10, 15],
             "model_MERF__regressor__rf__n_estimators": [50, 100]
+        }
+    ),
+    "FFNN_with_Embeddings_PerUserscaled": (
+        Pipeline([
+            (
+                "peruser_TTR",
+                PerUserTransformedTargetRegressor(
+                    regressor=inner_ffnn_pipeline,
+                    transformer=PerUserLabelScaler(),
+                    user_col=Config.USER_COL,
+                    drop_user=False
+                )
+            )
+        ]),
+        {
+            "peruser_TTR__regressor__keras_model__embedding_dim": [16, 32, 64, 128],
+            "peruser_TTR__regressor__keras_model__hidden_units": [(64, 32), (128, 64), (128, 64, 32)],
+            "peruser_TTR__regressor__batch_size": [32, 64]
         }
     )
 }

@@ -20,7 +20,7 @@ from tensorflow.keras.layers import Input, Embedding, Dense, Flatten, Concatenat
 from tensorflow.keras.models import Model
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense, Flatten, Embedding, Concatenate, Lambda
+from tensorflow.keras.layers import Input, Dense, Flatten, Embedding, Concatenate, Lambda, BatchNormalization, Dropout
 from tensorflow.keras.models import Model
 from sklearn.base import BaseEstimator, RegressorMixin
 
@@ -75,8 +75,6 @@ class PerUserInterceptModel(BaseEstimator, RegressorMixin):
             Name of detected 'intercept' column.
         """
         X = X.copy()  # Avoid modifying the original DataFrame
-    
-        # 🔍 **Step 1: Detect 'customer' column (contains letters + exactly 4-character strings)**
         cluster_col = None
         for col in X.columns:
             if X[col].dtype == "object" and X[col].apply(lambda v: isinstance(v, str) and len(v) == 4).all():
@@ -161,6 +159,7 @@ class PerUserLabelScaler(BaseEstimator, TransformerMixin):
                 std = self.user_stats_[user]['std']
             else:
                 # If the user wasn’t seen during fit, fall back to no scaling.
+                print("User was not seen during fit! No Scaling fallback.", flush=True)
                 mean, std = 0.0, 1.0
             y_scaled.append((val - mean) / std)
         return np.array(y_scaled)
@@ -519,23 +518,29 @@ class SplitFeaturesTransformer(BaseEstimator, TransformerMixin):
 
 
 
-
-
 # --- NEW: FFNN Model with Embedding Layer ---
 
 
 
 class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
     """
-    A custom scikit-learn estimator wrapping a Keras FFNN with user embeddings.
+    A custom scikit-learn estimator wrapping a Keras FFNN.
+    
+    When use_embedding=True, it expects sensor features plus a user column (and applies an embedding).
+    When use_embedding=False, it expects only sensor features.
+    
+    If sensor_feature_dim is set to None, the number of input features will be determined from X in fit().
     """
     def __init__(self,
-                 sensor_feature_dim=58,
+                 sensor_feature_dim=None,  # Allow None so we can determine input shape at fit time.
                  num_users=158,
                  embedding_dim=32,
                  hidden_units=(64, 32),
                  epochs=20,
                  batch_size=32,
+                 learning_rate=1e-3,
+                 dropout_rate=0.25,
+                 use_embedding=True,
                  verbose=0):
         self.sensor_feature_dim = sensor_feature_dim
         self.num_users = num_users
@@ -543,37 +548,51 @@ class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
         self.hidden_units = hidden_units
         self.epochs = epochs
         self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.dropout_rate = dropout_rate
+        self.use_embedding = use_embedding
         self.verbose = verbose
         self.model_ = None
 
+        # If embeddings are not used, the embedding_dim parameter is irrelevant.
+        if not self.use_embedding:
+            self.embedding_dim = None
+
     def _build_model(self):
-        main_input = Input(shape=(self.sensor_feature_dim+1,), name="merged_input")
+        if self.use_embedding:
+            # Expect input shape (sensor_feature_dim + 1,), where the last column is the user ID.
+            main_input = Input(shape=(self.sensor_feature_dim + 1,), name="merged_input")
+            sensor_data = Lambda(lambda x: x[:, :self.sensor_feature_dim])(main_input)
+            user_ids = Lambda(lambda x: tf.cast(x[:, self.sensor_feature_dim], tf.int32))(main_input)
+            user_embedding = Embedding(input_dim=self.num_users,
+                                       output_dim=self.embedding_dim,
+                                       embeddings_initializer='he_normal')(user_ids)
+            user_embedding = Flatten()(user_embedding)
+            x = Concatenate()([sensor_data, user_embedding])
+        else:
+            # Expect input shape (sensor_feature_dim,) only.
+            main_input = Input(shape=(self.sensor_feature_dim,), name="sensor_input")
+            x = main_input
 
-        # The first sensor_feature_dim columns: sensor data
-        sensor_data = Lambda(lambda x: x[:, :self.sensor_feature_dim])(main_input)
-        # The last column => user ID
-        user_ids = Lambda(lambda x: tf.cast(x[:, self.sensor_feature_dim], tf.int32))(main_input)
-
-        # Embedding layer
-        user_embedding = Embedding(input_dim=self.num_users,
-                                   output_dim=self.embedding_dim)(user_ids)
-        user_embedding = Flatten()(user_embedding)
-
-        x = Concatenate()([sensor_data, user_embedding])
+        # Build fully connected layers.
         for units in self.hidden_units:
-            x = Dense(units, activation="relu")(x)
+            x = Dense(units, activation="relu", kernel_initializer='he_normal')(x)
+            x = BatchNormalization()(x)
+            x = Dropout(self.dropout_rate)(x)
         output = Dense(1, activation="linear")(x)
-
         model = Model(inputs=main_input, outputs=output)
-        # Critically: keep a valid loss for Keras training
-        model.compile(
-            optimizer="adam",
-            loss="mean_squared_error",
-            metrics=[]  # no explicit metrics => no "loss" confusion for scikit-learn
-        )
+        optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
+        model.compile(optimizer=optimizer, loss="mean_squared_error")
         return model
 
     def fit(self, X, y):
+        # If sensor_feature_dim is None, infer it from the data X.
+        if self.sensor_feature_dim is None:
+            self.sensor_feature_dim = X.shape[1] if not self.use_embedding else X.shape[1] - 1
+            # Explanation:
+            # - For use_embedding=True, we expect X to have sensor features + one extra column (user IDs),
+            #   so sensor_feature_dim = total columns - 1.
+            # - For use_embedding=False, X is assumed to contain only sensor features.
         self.model_ = self._build_model()
         self.model_.fit(
             X, y,
@@ -584,9 +603,4 @@ class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
         return self
 
     def predict(self, X):
-        # .predict returns a 2D array, shape (n_samples, 1)
-        # we flatten to shape (n_samples,)
         return self.model_.predict(X, verbose=self.verbose).ravel()
-
-
-

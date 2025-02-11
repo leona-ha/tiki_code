@@ -30,6 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger("MLpipelineConfig")
 
 
+
 ##############################################################################
 # CUSTOM SCORERS FOR MERF (if needed)
 ##############################################################################
@@ -556,8 +557,8 @@ class MLpipeline:
 
             groups = train_df[self.cfg.USER_COL]
         
-            preprocessor = self.build_preprocessor(feature_cols, pipeline_name=pipeline_name)    
-            combined_pipeline = Pipeline([("preprocessor", preprocessor),] + list(raw_pipeline.steps))
+            preprocessor = self.build_preprocessor(feature_cols, pipeline_name=pipeline_name)
+            combined_pipeline = Pipeline([("preprocessor", preprocessor)] + list(raw_pipeline.steps))
            
             # ✅ Grid Search CV with correct label scaling
             gs = GridSearchCV(
