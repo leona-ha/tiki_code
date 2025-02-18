@@ -6,10 +6,14 @@ from sklearn.base import BaseEstimator, RegressorMixin, TransformerMixin,clone
 from sklearn.ensemble import RandomForestRegressor
 from merf.merf import MERF
 
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import pandas as pd
 import numpy as np
 from sklearn.utils.validation import check_is_fitted
+from sklearn.impute import KNNImputer, SimpleImputer, IterativeImputer
+import statsmodels.api as sm
+
+
 
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.metrics import r2_score
@@ -23,8 +27,7 @@ import tensorflow as tf
 from tensorflow.keras.layers import Input, Dense, Flatten, Embedding, Concatenate, Lambda, BatchNormalization, Dropout
 from tensorflow.keras.models import Model
 from sklearn.base import BaseEstimator, RegressorMixin
-
-
+import miceforest as mf
 
 
 class GlobalInterceptModel(BaseEstimator, RegressorMixin):
@@ -135,6 +138,9 @@ class PerUserInterceptModel(BaseEstimator, RegressorMixin):
         return y_pred
 
 
+##############################################################################
+# Label Scaler
+##############################################################################
 
 class PerUserLabelScaler(BaseEstimator, TransformerMixin):
     def __init__(self):
@@ -258,9 +264,65 @@ class PerUserTransformedTargetRegressor(BaseEstimator, RegressorMixin):
 
 
 ##############################################################################
-# MERF Wrapper
+####### PerUserFeatureImputer using KNN
 ##############################################################################
 
+
+
+class PerUserFeatureScaler(BaseEstimator, TransformerMixin):
+    """
+    Scales numeric columns separately for each user.
+
+    Parameters
+    ----------
+    user_col_index : int
+        The column index where 'customer' resides in the post-ColumnTransformer output.
+    numeric_indices : list of int
+        The column indices for numeric features that we want to scale per user.
+    strategy : str
+        'minmax' for MinMaxScaler, otherwise StandardScaler.
+    """
+    def __init__(self, user_col_index, numeric_indices, strategy='standard'):
+        self.user_col_index = user_col_index
+        self.numeric_indices = numeric_indices
+        self.strategy = strategy
+    
+        self.scalers_ = {}
+
+        if strategy == 'minmax':
+            self._scaler_class = MinMaxScaler
+        else:
+            self._scaler_class = StandardScaler
+
+    def fit(self, X, y=None):
+        unique_customers = np.unique(X[:, self.user_col_index])
+        for customer in unique_customers:
+            mask = (X[:, self.user_col_index] == customer)
+            user_data = X[mask][:, self.numeric_indices]
+
+            scaler = self._scaler_class()
+            scaler.fit(user_data)
+            self.scalers_[customer] = scaler
+
+
+        return self
+
+    def transform(self, X, y=None):
+        X_out = X.copy()
+
+        for customer, scaler in self.scalers_.items():
+            mask = (X_out[:, self.user_col_index] == customer)
+            if np.any(mask):
+                user_data = X_out[mask][:, self.numeric_indices]
+                X_out[mask][:, self.numeric_indices] = scaler.transform(user_data)
+
+        # If there are unseen customers at predict-time, decide how to handle them (not shown).
+        return X_out
+
+
+##############################################################################
+# MERF Wrapper
+##############################################################################
 
 
 class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
@@ -360,13 +422,10 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
         # 🚀 Ensure Z is 2D
         Z = intercept_series.values.reshape(-1, 1).astype(np.float64)
     
-        # 🚀 Strict Type Conversion
         X_fixed = X_fixed.astype(np.float64)
         Z = Z.astype(np.float64)
         y = np.array(y).astype(np.float64)
 
-    
-        # 🚀 Fit MERF
         self.merf_model.fit(X_fixed.values, Z, clusters_series, y)
     
         # ✅ Mark the model as fitted using sklearn's standard API
@@ -435,6 +494,126 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
                 max_iterations=self.max_iterations
             )
         return self
+
+
+##############################################################################
+# LMER Wrapper
+##############################################################################
+
+
+class LMERWrapper(BaseEstimator, RegressorMixin):
+    """
+    A scikit-learn wrapper for a linear mixed-effects regression model using statsmodels' MixedLM.
+    It automatically detects the grouping ('customer') column and (optionally) an intercept column,
+    renaming them as needed, and fits the model via MixedLM.from_formula.
+    
+    Parameters
+    ----------
+    re_formula : str, default="1"
+        The random effects formula. For example, "1" for random intercept only or "time" for a random slope on 'time'.
+    method : str, default="lbfgs"
+        The optimization method used by statsmodels.
+    """
+    def __init__(self, re_formula="1", method="lbfgs"):
+        self.re_formula = re_formula
+        self.method = method
+    def _ensure_unique_columns(self, df):
+        """
+        Ensures that all column names in the DataFrame are unique.
+        If duplicates are found, they are renamed by appending a suffix.
+        """
+        new_columns = []
+        seen = {}
+        for col in df.columns:
+            if col in seen:
+                seen[col] += 1
+                new_columns.append(f"{col}_{seen[col]}")
+            else:
+                seen[col] = 0
+                new_columns.append(col)
+        df.columns = new_columns
+        return df
+
+
+    def _detect_columns(self, X):
+        """
+        Detects the 'customer' (grouping) column and the intercept column.
+        
+        Returns
+        -------
+        cluster_col : str
+            Name of detected customer/group column.
+        intercept_col : str or None
+            Name of detected intercept column, or None if not found.
+        """
+        X = X.copy()
+        cluster_col = None
+        for col in X.columns:
+            if X[col].apply(lambda v: isinstance(v, str) and len(v) == 4 and any(c.isalpha() for c in v)).all():
+                cluster_col = col
+                break
+
+        intercept_col = None
+        for col in X.columns:
+            if np.all(X[col].astype(str) == "1"):
+                intercept_col = col
+                break
+
+        return cluster_col, intercept_col
+                    
+    def fit(self, X, y):
+        # Ensure X is a DataFrame.
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+        
+        # Drop duplicate columns in the original input and reset the index.
+        X = X.loc[:, ~X.columns.duplicated()].reset_index(drop=True)
+        
+        # Detect grouping and intercept columns.
+        cluster_col, intercept_col = self._detect_columns(X)
+        if cluster_col is None:
+            raise ValueError("No grouping (customer) column detected in input X.")
+        
+        # Rename detected columns.
+        X = X.rename(columns={cluster_col: "group"})
+        if intercept_col is not None:
+            X = X.rename(columns={intercept_col: "intercept"})
+        
+        # Prepare predictors: drop the group column.
+        predictors = X.drop(columns=["group"])
+        
+        # If no intercept column is provided, add a constant column.
+        # Use has_constant='skip' to avoid adding a duplicate constant.
+        if "intercept" not in predictors.columns and "const" not in predictors.columns:
+            predictors = sm.add_constant(predictors, has_constant='skip')
+        
+        # Drop any duplicate columns from predictors and reset the index.
+        predictors = predictors.loc[:, ~predictors.columns.duplicated()].reset_index(drop=True)
+        
+        # Combine predictors and response into one DataFrame.
+        data = predictors.copy()
+        data["y"] = y
+        # Add back the grouping variable.
+        data["group"] = X["group"]
+        
+        # Drop any duplicate columns in the combined data and reset the index.
+        data = data.loc[:, ~data.columns.duplicated()].reset_index(drop=True)
+        
+        # Build formula: use all predictors (exclude "y" and "group").
+        predictor_terms = " + ".join([col for col in data.columns if col not in ["y", "group"]])
+        formula = "y ~ " + predictor_terms
+        
+        # Debug: print final columns and index.
+        print("Final data columns for MixedLM:", data.columns.tolist())
+        print("Final data index (should be unique):", data.index.tolist())
+        
+        # Fit the MixedLM using from_formula.
+        self.model_ = sm.MixedLM.from_formula(formula, groups="group",
+                                              re_formula=self.re_formula, data=data)
+        self.result_ = self.model_.fit(method=self.method)
+        self.is_fitted_ = True
+        return self
+
 
 ##############################################################################
 # PersonEmbedding
@@ -515,11 +694,6 @@ class SplitFeaturesTransformer(BaseEstimator, TransformerMixin):
         X_merged = np.hstack([sensor_data, user_data]).astype(float)
         
         return X_merged
-
-
-
-# --- NEW: FFNN Model with Embedding Layer ---
-
 
 
 class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
@@ -604,3 +778,49 @@ class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
 
     def predict(self, X):
         return self.model_.predict(X, verbose=self.verbose).ravel()
+
+
+class MiceForestImputer(BaseEstimator, TransformerMixin):
+    """
+    A scikit-learn transformer that uses miceforest to impute missing values via 
+    MICE with random forests.
+    
+    Parameters
+    ----------
+    iterations : int, default=10
+        Number of MICE iterations to perform during fitting.
+    random_state : int or None, default=None
+        Random seed for reproducibility.
+    """
+    def __init__(self, iterations=10, random_state=None):
+        self.iterations = iterations
+        self.random_state = random_state
+        self.kernel_ = None
+        self.columns_ = None
+
+    def fit(self, X, y=None):
+        # Ensure X is a DataFrame and reset its index as required by miceforest.
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+        X = X.reset_index(drop=True)  # This line resets the index.
+        self.columns_ = X.columns
+        # Create the imputation kernel (omitting unsupported parameters)
+        self.kernel_ = mf.ImputationKernel(
+            X,
+            random_state=self.random_state
+        )
+        # Run the MICE algorithm for the specified number of iterations.
+        self.kernel_.mice(self.iterations)
+        return self
+
+    def transform(self, X):
+        # Ensure that X is a DataFrame with the same columns as during fit.
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X, columns=self.columns_)
+        else:
+            X = X[self.columns_]
+        X = X.reset_index(drop=True)  # Reset index if needed.
+        # Use the fitted kernel to impute missing values in new data.
+        imputed_data = self.kernel_.impute_new_data(X)
+        # Convert the ImputedData object to a complete DataFrame (using the first dataset).
+        return imputed_data.complete_data(dataset=0)

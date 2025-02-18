@@ -5,6 +5,7 @@ from sklearn.base import BaseEstimator, TransformerMixin,RegressorMixin
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, OneHotEncoder, FunctionTransformer,OrdinalEncoder, LabelEncoder
+
 from sklearn.impute import SimpleImputer, KNNImputer,IterativeImputer
 from sklearn.metrics import make_scorer, r2_score, mean_absolute_error, mean_squared_error
 from sklearn.model_selection import BaseCrossValidator
@@ -15,8 +16,9 @@ from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.model_selection import train_test_split
 import scipy.stats as st
-
-
+from custom_models import PerUserFeatureScaler,LMERWrapper,MiceForestImputer
+from tensorflow.keras.models import clone_model
+import sklearn
 
 
 # Configure logging for the module
@@ -29,6 +31,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MLpipelineConfig")
 
+
+class DropCustomerColumn(BaseEstimator, TransformerMixin):
+    """
+    Drops the column at the given index (e.g., the customer column)
+    so that the final estimator only sees numeric data.
+    """
+    def __init__(self, customer_col_index):
+        self.customer_col_index = customer_col_index
+        
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        return np.delete(X, self.customer_col_index, axis=1)
 
 
 ##############################################################################
@@ -56,29 +72,6 @@ custom_scorers = {
     "rmse": make_scorer(rmse_scorer, greater_is_better=False),
     "r2": make_scorer(r2_custom_scorer, greater_is_better=True),
 }
-
-
-
-
-class DebugColumnsTransformer(BaseEstimator, TransformerMixin):
-    def __init__(self, name="DebugColumns"):
-        self.name = name
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X):
-        if isinstance(X, pd.DataFrame):
-            print(f"[{self.name}] Shape: {X.shape}")
-            print(f"[{self.name}] Columns: {X.columns.tolist()}")
-            duplicates = X.columns[X.columns.duplicated()].tolist()
-            if duplicates:
-                print(f"[{self.name}] Duplicate columns detected: {duplicates}")
-            else:
-                print(f"[{self.name}] No duplicate columns.")
-        else:
-            print(f"[{self.name}] Array shape: {X.shape}")
-        return X
 
 
 ##############################################################################
@@ -174,6 +167,7 @@ class PerUserForwardChainingCV(BaseCrossValidator):
 
             logger.debug(f"Fold {i}: train_size={len(train_idx)}, test_size={len(test_idx)}")
             yield train_idx, test_idx
+
 
 
 
@@ -351,10 +345,6 @@ class MLpipeline:
     ##########################################################################
 
     def assign_feature_columns(self, feature_cols, pipeline_name=None):
-        """
-        Assign feature columns for skewed, non-skewed, and categorical groups.
-        Optionally include the USER_COL for MERF pipelines.
-        """
         skewed_cols = [col for col in feature_cols if col in self.cfg.SKEWED_FEATURES]
         non_skewed_cols = [
             col for col in feature_cols
@@ -383,138 +373,297 @@ class MLpipeline:
             feature_cols = list(set(base_features) - set(self.cfg.person_static_features))
     
         # Add MERF-specific columns for MERF pipelines
-        if "MERF" in pipeline_name:
+        if ("MERF" in pipeline_name) or ("LMER" in pipeline_name):
             feature_cols.extend(self.cfg.merf_cols)  
-        elif ("PerUser" in pipeline_name) or ("Embeddings" in pipeline_name):
+        elif ("PUP" in pipeline_name) or ("PerUser" in pipeline_name) or ("Embeddings" in pipeline_name):
             feature_cols.append(self.cfg.USER_COL)
 
-        print("features:",list(set(feature_cols)), flush=True)
 
-            
-        # Return unique feature columns (no duplicates)
         return list(set(feature_cols))
-
-
-
-    
+        
     def build_preprocessor(self, feature_cols, pipeline_name):
         """
         Build a ColumnTransformer pipeline for numeric/categorical data.
-        Passes only 'intercept' through without transformation.
+        Passes only 'intercept' or 'customer' through without transformation (depending on pipeline_name).
         """
-        # Define imputers based on configuration
     
+        # --- [1] Define imputers based on configuration ---------------
         if self.cfg.IMPUTE_STRATEGY == "knn":
             imputer_numeric = KNNImputer(n_neighbors=5)
         elif self.cfg.IMPUTE_STRATEGY == "iterative":
-            imputer_numeric = IterativeImputer(max_iter=10, random_state=42)
+            imputer_numeric = IterativeImputer(max_iter=30, random_state=42)
+        elif self.cfg.IMPUTE_STRATEGY == "mice":
+            imputer_numeric = MiceForestImputer(iterations=10, random_state=42)
         else:
             imputer_numeric = SimpleImputer(strategy=self.cfg.IMPUTE_STRATEGY)
     
-        # Define scalers based on configuration
+        # --- [2] Define scalers based on configuration ---------------
         if self.cfg.SCALER_STRATEGY == "minmax":
             scaler = MinMaxScaler()
+            scale_strategy = "minmax"
         else:
             scaler = StandardScaler()
+            scale_strategy = "standard"
     
-        # Get feature groups
+        # --- [3] Get feature groups ----------------------------------
         skewed_cols, non_skewed_cols, cat_cols = self.assign_feature_columns(feature_cols, pipeline_name)
         actual_fixed_categories = [self.cfg.categorical_features_categories[col] for col in cat_cols]
-
     
-        # Define pipelines for different feature types
-        skewed_numeric_pipeline = Pipeline([
-            ("impute", imputer_numeric),
-            ("log_transform", FunctionTransformer(np.log1p, validate=False)),
-            ("varth", VarianceThreshold()),  # Apply VarianceThreshold here
-            ("scale", scaler)
-        ])
+        # --- [4] Define pipelines for different feature types --------
+        if "PUP" in pipeline_name:
+            skewed_numeric_pipeline = Pipeline([
+                ("impute", imputer_numeric),
+    #            ("log_transform", FunctionTransformer(np.log1p, validate=False)),
+                ("varth", VarianceThreshold())
+            ])
+            non_skewed_numeric_pipeline = Pipeline([
+                ("impute", imputer_numeric),
+                ("varth", VarianceThreshold())
+            ])
+        else:
+            # The original approach: apply the global scaler here
+            skewed_numeric_pipeline = Pipeline([
+                ("impute", imputer_numeric),
+                ("log_transform", FunctionTransformer(np.log1p, validate=False)),
+                ("varth", VarianceThreshold()),
+                ("scale", scaler)
+            ])
+            non_skewed_numeric_pipeline = Pipeline([
+                ("impute", imputer_numeric),
+                ("varth", VarianceThreshold()),
+                ("scale", scaler)
+            ])
     
-        non_skewed_numeric_pipeline = Pipeline([
-            ("impute", imputer_numeric),
-            ("varth", VarianceThreshold()),  # Apply VarianceThreshold here
-            ("scale", scaler)
-        ])
+        # Categorical pipeline remains the same
         categorical_pipeline = Pipeline([
             ("onehot", OneHotEncoder(categories=actual_fixed_categories, handle_unknown="ignore"))
         ])
-            
-        # Initialize list of transformers
+    
         transformers = [
             ("skewed_num", skewed_numeric_pipeline, skewed_cols),
             ("non_skewed_num", non_skewed_numeric_pipeline, non_skewed_cols),
             ("cat", categorical_pipeline, cat_cols),
         ]
-
-        # Pass through 'customer' and 'intercept' without transformation
+    
+        # --- [6] Pass through 'customer' and/or 'intercept' exactly as in original code
         if "MERF" in pipeline_name:
             transformers.append(("customer_pass", "passthrough", ["customer"]))
             transformers.append(("intercept_pass", "passthrough", ["intercept"]))
-      
-        elif ("PerUser" in pipeline_name)or ("Embeddings" in pipeline_name):
+        elif "LMER" in pipeline_name:
             transformers.append(("customer_pass", "passthrough", ["customer"]))
-
+            transformers.append(("intercept_pass", "passthrough", ["intercept"]))
     
-        # Instantiate the ColumnTransformer
+        elif ("PerUser" in pipeline_name) or ("Embeddings" in pipeline_name):
+            transformers.append(("customer_pass", "passthrough", ["customer"]))
+    
+        elif "PUP" in pipeline_name: 
+            transformers.append(("customer_pass", "passthrough", ["customer"]))
+    
         column_transformer = ColumnTransformer(
             transformers=transformers,
-            remainder='drop'  # Pass any columns not specified in transformers
+            remainder='drop'
         )
-        
-        preprocessor = Pipeline([
-            ("column_transformer", column_transformer),
-        ])
+
+        if "PUP" in pipeline_name:
+            all_numeric_cols = skewed_cols + non_skewed_cols
+            numeric_dim = len(all_numeric_cols)
+    
+            cat_dim = sum(len(cats) for cats in actual_fixed_categories)
+            user_col_index = numeric_dim + cat_dim
+    
+            numeric_indices = list(range(numeric_dim))
+    
+            per_user_scaler = PerUserFeatureScaler(
+                user_col_index=user_col_index,
+                numeric_indices=numeric_indices,
+                strategy=scale_strategy  # (minmax or standard)
+            )
+    
+            if any(x in pipeline_name for x in ["MERF","LMER", "Embeddings", "PerUser"]):
+                # For pipelines that need the customer column:
+                preprocessor = Pipeline([
+                    ("column_transformer", column_transformer),
+                    ("per_user_scaler", per_user_scaler)
+
+                ])
+            else:
+                # For pipelines that do not need the customer column:
+                preprocessor = Pipeline([
+                    ("column_transformer", column_transformer),
+                    ("per_user_scaler", per_user_scaler),
+                    ("drop_customer", DropCustomerColumn(customer_col_index=user_col_index))
+                ])
+
+    
+        else:
+            preprocessor = Pipeline([
+                ("column_transformer", column_transformer),
+            ])
     
         return preprocessor
 
-    def evaluate_holdout_all(self, results_timebased):
+    ##########################################################################
+    # Main run: hold out
+    ##########################################################################
+
+    def evaluate_holdout_embedding_adaptation(self, model, X_holdout, y_holdout):
         """
-        Evaluate trained models on the holdout users.
+        For models using embeddings, adapt the embedding layer for new users
+        based on the first 80% of each user's holdout data.
+        For new (unseen) users, instantiate a baseline prediction (here: global mean).
         
         Parameters
         ----------
-        results_timebased : list
-            List of trained models and their results from `run()`.
+        model : trained Keras model (with embedding)
+        X_holdout : DataFrame of holdout features.
+        y_holdout : Series of holdout targets.
+        
+        Returns
+        -------
+        adapted_results : dict
+            A dictionary mapping user id to their evaluation metrics.
+        """
+        adapted_results = {}
+        
+        # Determine known users from training data.
+        known_users = set(self.df_known[self.cfg.USER_COL].unique())
+        # Use global mean of the target from known users as the baseline value.
+        baseline_value = self.df_known[self.cfg.LABEL_COL].mean()
+        
+        # Group holdout data by user
+        for user, group in X_holdout.groupby(self.cfg.USER_COL):
+            group = group.sort_values(by=self.cfg.TIME_COL)
+            n = len(group)
+            if n < 5:
+                # Skip users with too few data points.
+                continue
+            
+            split_idx = int(0.8 * n)
+            X_adapt = group.iloc[:split_idx]
+            X_eval = group.iloc[split_idx:]
+            y_adapt = y_holdout.loc[X_adapt.index]
+            y_eval = y_holdout.loc[X_eval.index]
+            
+            # If this user was never seen during training, use the baseline.
+            if user not in known_users:
+                y_pred_baseline = np.full(len(X_eval), baseline_value)
+                r2_baseline = r2_score(y_eval, y_pred_baseline)
+                mae_baseline = mean_absolute_error(y_eval, y_pred_baseline)
+                rmse_baseline = np.sqrt(mean_squared_error(y_eval, y_pred_baseline))
+                adapted_results[user] = {
+                    "baseline": True,
+                    "n_adapt": 0,
+                    "n_eval": len(X_eval),
+                    "r2": r2_baseline,
+                    "mae": mae_baseline,
+                    "rmse": rmse_baseline,
+                    "y_true": y_eval.values,
+                    "y_pred": y_pred_baseline,
+                }
+                self.logger.info(f"[Holdout Adaptation] New user baseline for user: {user} | "
+                                 f"n_eval: {len(X_eval)} | r2: {r2_baseline:.3f} | mae: {mae_baseline:.3f} | rmse: {rmse_baseline:.3f}")
+                continue
+            
+            # Otherwise, adapt the embedding layer.
+            adapted_model = clone_model(model)
+            adapted_model.set_weights(model.get_weights())
+            # Freeze all layers except the embedding layer (assuming its name is 'user_embedding').
+            for layer in adapted_model.layers:
+                if layer.name != 'user_embedding':
+                    layer.trainable = False
+                else:
+                    self.logger.info(f"Adapting embedding layer for user {user}.")
+            
+            adapted_model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+                loss=model.loss,
+                metrics=["mae"]
+            )
+            adapted_model.fit(
+                X_adapt, y_adapt,
+                epochs=5,
+                batch_size=32,
+                verbose=0
+            )
+            y_pred_adapt = adapted_model.predict(X_eval).ravel()
+            r2_adapt = r2_score(y_eval, y_pred_adapt)
+            mae_adapt = mean_absolute_error(y_eval, y_pred_adapt)
+            rmse_adapt = np.sqrt(mean_squared_error(y_eval, y_pred_adapt))
+            
+            adapted_results[user] = {
+                "baseline": False,
+                "n_adapt": len(X_adapt),
+                "n_eval": len(X_eval),
+                "r2": r2_adapt,
+                "mae": mae_adapt,
+                "rmse": rmse_adapt,
+                "y_true": y_eval.values,
+                "y_pred": y_pred_adapt,
+            }
+            self.logger.info(f"[Holdout Adaptation] User: {user} | n_adapt: {len(X_adapt)} | "
+                             f"n_eval: {len(X_eval)} | r2: {r2_adapt:.3f} | mae: {mae_adapt:.3f} | rmse: {rmse_adapt:.3f}")
+        
+        return adapted_results
+
+    def evaluate_holdout_all(self, results_timebased):
+        """
+        Evaluate trained models on the holdout users and return two sets of results:
+        
+        1. Unadapted holdout results for all models (including FFNN+Embedding, where new users
+           get baseline predictions if not seen during training).
+        2. Adapted results for FFNN+Embedding and person-static intercept models:
+           For each holdout user, if the user was seen during training, adapt the model (fine-tune
+           the embedding layer or intercept) on the first 80% of that user's data and then evaluate on the remaining 20%.
         
         Returns
         -------
         holdout_results : list
-            Evaluation results for the holdout set.
+            Overall evaluation scores from unadapted predictions.
+        adaptation_results : dict
+            For applicable pipelines (e.g., with "Embedding" or "Intercept" in their name),
+            a dict mapping pipeline names to per-user adaptation metrics.
         """
         holdout_results = []
-    
+        adaptation_results = {}  # To store adaptation (fine-tuning) results for applicable pipelines
+        
         # Ensure holdout data is available
         if self.df_holdout is None or len(self.df_holdout) == 0:
             self.logger.warning("No holdout data available for evaluation.")
-            return holdout_results
+            return holdout_results, adaptation_results
     
-        for model_result in results_timebased:  # ✅ Use results_timebased
-            pipeline_name = model_result["pipeline_name"]  # ✅ Get pipeline name
-            feature_cols = self._get_feature_cols(pipeline_name)  # ✅ Get correct features
-    
+        for model_result in results_timebased:
+            pipeline_name = model_result["pipeline_name"]
+            feature_cols = self._get_feature_cols(pipeline_name)
             X_holdout = self.df_holdout[feature_cols]
             y_holdout = self.df_holdout[self.cfg.LABEL_COL]
-    
             model = model_result["best_estimator"]
     
             try:
+                # Unadapted predictions for all models:
                 y_pred = model.predict(X_holdout)
                 scores = {
                     "r2": r2_score(y_holdout, y_pred),
                     "mae": mean_absolute_error(y_holdout, y_pred),
                     "rmse": np.sqrt(mean_squared_error(y_holdout, y_pred))
                 }
-                self.logger.info(f"[{pipeline_name}] Holdout Scores: {scores}")
-    
+                self.logger.info(f"[{pipeline_name}] Holdout (Unadapted) Scores: {scores}")
                 holdout_results.append({
                     "pipeline_name": pipeline_name,
                     "holdout_scores": scores
                 })
+                
+                # For pipelines that use embeddings or person-static intercepts,
+                # perform an adaptation evaluation.
+                if any(x in pipeline_name for x in ["Embedding", "Intercept"]):
+                    self.logger.info(f"Performing adaptation evaluation for pipeline: {pipeline_name}")
+                    adapted = self.evaluate_holdout_embedding_adaptation(model, X_holdout, y_holdout)
+                    adaptation_results[pipeline_name] = adapted
+                    
             except Exception as e:
                 self.logger.error(f"[{pipeline_name}] Error evaluating holdout set: {e}")
                 continue
     
-        return holdout_results
+        return holdout_results, adaptation_results
 
 
     ##########################################################################
