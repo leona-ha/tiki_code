@@ -20,14 +20,12 @@ from sklearn.metrics import r2_score
 from sklearn.preprocessing import LabelEncoder
 
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Embedding, Dense, Flatten, Concatenate
-from tensorflow.keras.models import Model
-import numpy as np
-import tensorflow as tf
 from tensorflow.keras.layers import Input, Dense, Flatten, Embedding, Concatenate, Lambda, BatchNormalization, Dropout
 from tensorflow.keras.models import Model
 from sklearn.base import BaseEstimator, RegressorMixin
-import miceforest as mf
+from tensorflow.keras import regularizers
+from tensorflow.keras.callbacks import EarlyStopping
+
 
 
 class GlobalInterceptModel(BaseEstimator, RegressorMixin):
@@ -335,7 +333,8 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
         self,
         gll_early_stop_threshold=0.01, 
         max_iterations=5,
-        rf__n_estimators=300,  # Hyperparameter to tune the random forest
+        rf__n_estimators=100,  # Number of trees in the random forest
+        rf__max_depth=5     # New hyperparameter to control the maximum depth of trees
     ):
         """
         Parameters
@@ -346,13 +345,20 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
             Maximum EM iterations for MERF.
         rf__n_estimators : int
             Number of trees in the random forest (fixed effects).
+        rf__max_depth : int or None
+            Maximum depth of each tree in the random forest. Limiting the depth can reduce overfitting.
         """
         self.gll_early_stop_threshold = gll_early_stop_threshold
         self.max_iterations = max_iterations
         self.rf__n_estimators = rf__n_estimators
+        self.rf__max_depth = rf__max_depth
 
-        # Initialize MERF model
-        fe_model = RandomForestRegressor(n_estimators=self.rf__n_estimators, n_jobs=-1)
+        # Initialize MERF model with the updated RandomForestRegressor settings
+        fe_model = RandomForestRegressor(
+            n_estimators=self.rf__n_estimators, 
+            max_depth=self.rf__max_depth, 
+            n_jobs=-1
+        )
         self.merf_model = MERF(
             fixed_effects_model=fe_model,
             gll_early_stop_threshold=self.gll_early_stop_threshold,
@@ -376,7 +382,7 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
         """
         X = X.copy()  # Avoid modifying the original DataFrame
     
-        # 🔍 **Step 1: Detect 'customer' column (contains letters + exactly 4-character strings)**
+        # 🔍 **Step 1: Detect 'customer' column**
         cluster_col = None
         for col in X.columns:
             if X[col].apply(lambda v: isinstance(v, str) and len(v) == 4 and any(c.isalpha() for c in v)).all():
@@ -396,7 +402,6 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
             if X[col].astype(str).str.lower().isin(["nan", "none", "null", "inf", "-inf"]).any():
                 non_numeric_cols.append(col)
     
-    
         return cluster_col, intercept_col
         
 
@@ -410,33 +415,29 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
         cluster_col, intercept_col = self._detect_columns(X)
         X = X.rename(columns={cluster_col: "cluster", intercept_col: "intercept"})
     
-        # Extract cluster IDs
+        # Extract cluster IDs and intercept column
         clusters_series = X["cluster"]
-
-        # Extract intercept column
         intercept_series = X["intercept"]
     
         # Extract fixed-effect columns => exclude 'cluster' and 'intercept'
         X_fixed = X.drop(columns=["cluster", "intercept"])
     
-        # 🚀 Ensure Z is 2D
+        # Ensure Z is 2D
         Z = intercept_series.values.reshape(-1, 1).astype(np.float64)
     
         X_fixed = X_fixed.astype(np.float64)
-        Z = Z.astype(np.float64)
         y = np.array(y).astype(np.float64)
-
+    
         self.merf_model.fit(X_fixed.values, Z, clusters_series, y)
     
-        # ✅ Mark the model as fitted using sklearn's standard API
+        # Mark the model as fitted
         setattr(self, "is_fitted_", True)  
-    
         return self
 
     def predict(self, X):
         """ Predict using the MERF model, handling unseen users. """
     
-        # 🚨 Check if the model is fitted
+        # Check if the model is fitted
         check_is_fitted(self, "is_fitted_")
     
         if not isinstance(X, pd.DataFrame):
@@ -446,48 +447,41 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
         cluster_col, intercept_col = self._detect_columns(X)
         X = X.rename(columns={cluster_col: "cluster", intercept_col: "intercept"})
     
-        # Extract cluster IDs
+        # Extract cluster IDs and intercept column
         clusters_series = X["cluster"]
-    
-        # Extract intercept column (random effects input)
         intercept_series = X["intercept"]
     
-        # Extract fixed-effect columns => exclude 'cluster' and 'intercept'
+        # Extract fixed-effect columns
         X_fixed = X.drop(columns=["cluster", "intercept"]).astype(np.float64)
         Z = intercept_series.values.reshape(-1, 1).astype(np.float64)
-
         
-        # Predict with MERF (handles unseen users by default)
+        # Predict with MERF
         return self.merf_model.predict(X_fixed.values, Z, clusters_series)
-
-
 
     def get_params(self, deep=True):
         """Expose hyperparameters for GridSearchCV."""
-        
-        # 🚀 Ensure the model is trained before allowing GridSearchCV to score
-        if not hasattr(self.merf_model, "trained_b"):
-            print("❌ WARNING: GridSearchCV is trying to access an untrained MERF model!")
-    
         params = {
             "gll_early_stop_threshold": self.gll_early_stop_threshold,
             "max_iterations": self.max_iterations,
             "rf__n_estimators": self.rf__n_estimators,
+            "rf__max_depth": self.rf__max_depth,
         }
         return params
 
-    
     def set_params(self, **params):
         """
         Set hyperparameters and reinitialize MERF model if necessary.
         """
-    
         for param, value in params.items():
             setattr(self, param, value)
     
         # Reinitialize MERF model if relevant parameters changed
-        if any(k in params for k in ["gll_early_stop_threshold", "max_iterations", "rf__n_estimators"]):
-            fe_model = RandomForestRegressor(n_estimators=self.rf__n_estimators, n_jobs=-1)
+        if any(k in params for k in ["gll_early_stop_threshold", "max_iterations", "rf__n_estimators", "rf__max_depth"]):
+            fe_model = RandomForestRegressor(
+                n_estimators=self.rf__n_estimators, 
+                max_depth=self.rf__max_depth,
+                n_jobs=-1
+            )
             self.merf_model = MERF(
                 fixed_effects_model=fe_model,
                 gll_early_stop_threshold=self.gll_early_stop_threshold,
@@ -616,7 +610,7 @@ class LMERWrapper(BaseEstimator, RegressorMixin):
 
 
 ##############################################################################
-# PersonEmbedding
+# Keras Split
 ##############################################################################
 
 
@@ -696,24 +690,21 @@ class SplitFeaturesTransformer(BaseEstimator, TransformerMixin):
         return X_merged
 
 
+##############################################################################
+# Keras Regressor
+##############################################################################
+
 class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
-    """
-    A custom scikit-learn estimator wrapping a Keras FFNN.
-    
-    When use_embedding=True, it expects sensor features plus a user column (and applies an embedding).
-    When use_embedding=False, it expects only sensor features.
-    
-    If sensor_feature_dim is set to None, the number of input features will be determined from X in fit().
-    """
     def __init__(self,
-                 sensor_feature_dim=None,  # Allow None so we can determine input shape at fit time.
+                 sensor_feature_dim=None,
                  num_users=158,
                  embedding_dim=32,
                  hidden_units=(64, 32),
-                 epochs=20,
+                 epochs=18,
                  batch_size=32,
                  learning_rate=1e-3,
                  dropout_rate=0.25,
+                 l2_reg=0.0,  # New parameter for L2 regularization
                  use_embedding=True,
                  verbose=0):
         self.sensor_feature_dim = sensor_feature_dim
@@ -724,17 +715,17 @@ class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.dropout_rate = dropout_rate
+        self.l2_reg = l2_reg  # Store new parameter
         self.use_embedding = use_embedding
         self.verbose = verbose
         self.model_ = None
 
-        # If embeddings are not used, the embedding_dim parameter is irrelevant.
         if not self.use_embedding:
             self.embedding_dim = None
 
     def _build_model(self):
+
         if self.use_embedding:
-            # Expect input shape (sensor_feature_dim + 1,), where the last column is the user ID.
             main_input = Input(shape=(self.sensor_feature_dim + 1,), name="merged_input")
             sensor_data = Lambda(lambda x: x[:, :self.sensor_feature_dim])(main_input)
             user_ids = Lambda(lambda x: tf.cast(x[:, self.sensor_feature_dim], tf.int32))(main_input)
@@ -744,83 +735,47 @@ class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
             user_embedding = Flatten()(user_embedding)
             x = Concatenate()([sensor_data, user_embedding])
         else:
-            # Expect input shape (sensor_feature_dim,) only.
             main_input = Input(shape=(self.sensor_feature_dim,), name="sensor_input")
             x = main_input
 
-        # Build fully connected layers.
+        # Build fully connected layers with L2 regularization
         for units in self.hidden_units:
-            x = Dense(units, activation="relu", kernel_initializer='he_normal')(x)
+            x = Dense(units, activation="relu", kernel_initializer='he_normal'
+                      )(x)
             x = BatchNormalization()(x)
             x = Dropout(self.dropout_rate)(x)
         output = Dense(1, activation="linear")(x)
         model = Model(inputs=main_input, outputs=output)
         optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
-        model.compile(optimizer=optimizer, loss="mean_squared_error")
+        model.compile(optimizer=optimizer, loss="mean_squared_error", metrics=["mae"])
         return model
 
     def fit(self, X, y):
-        # If sensor_feature_dim is None, infer it from the data X.
+        # If sensor_feature_dim is None, infer it from the data X
         if self.sensor_feature_dim is None:
             self.sensor_feature_dim = X.shape[1] if not self.use_embedding else X.shape[1] - 1
-            # Explanation:
-            # - For use_embedding=True, we expect X to have sensor features + one extra column (user IDs),
-            #   so sensor_feature_dim = total columns - 1.
-            # - For use_embedding=False, X is assumed to contain only sensor features.
+    
         self.model_ = self._build_model()
-        self.model_.fit(
+        
+        # Add EarlyStopping callback
+        early_stopping = EarlyStopping(
+            monitor='val_loss',
+            patience=5,
+#            min_delta=1e-4,
+            restore_best_weights=True
+        )
+        
+        # Fit the model, including the early_stopping callback
+        self.history_ = self.model_.fit(
             X, y,
             epochs=self.epochs,
             batch_size=self.batch_size,
+#            validation_split=0.1,  # 10% of data used for validation
+#            callbacks=[early_stopping],
             verbose=self.verbose
         )
         return self
 
+
     def predict(self, X):
         return self.model_.predict(X, verbose=self.verbose).ravel()
-
-
-class MiceForestImputer(BaseEstimator, TransformerMixin):
-    """
-    A scikit-learn transformer that uses miceforest to impute missing values via 
-    MICE with random forests.
-    
-    Parameters
-    ----------
-    iterations : int, default=10
-        Number of MICE iterations to perform during fitting.
-    random_state : int or None, default=None
-        Random seed for reproducibility.
-    """
-    def __init__(self, iterations=10, random_state=None):
-        self.iterations = iterations
-        self.random_state = random_state
-        self.kernel_ = None
-        self.columns_ = None
-
-    def fit(self, X, y=None):
-        # Ensure X is a DataFrame and reset its index as required by miceforest.
-        if not isinstance(X, pd.DataFrame):
-            X = pd.DataFrame(X)
-        X = X.reset_index(drop=True)  # This line resets the index.
-        self.columns_ = X.columns
-        # Create the imputation kernel (omitting unsupported parameters)
-        self.kernel_ = mf.ImputationKernel(
-            X,
-            random_state=self.random_state
-        )
-        # Run the MICE algorithm for the specified number of iterations.
-        self.kernel_.mice(self.iterations)
-        return self
-
-    def transform(self, X):
-        # Ensure that X is a DataFrame with the same columns as during fit.
-        if not isinstance(X, pd.DataFrame):
-            X = pd.DataFrame(X, columns=self.columns_)
-        else:
-            X = X[self.columns_]
-        X = X.reset_index(drop=True)  # Reset index if needed.
-        # Use the fitted kernel to impute missing values in new data.
-        imputed_data = self.kernel_.impute_new_data(X)
-        # Convert the ImputedData object to a complete DataFrame (using the first dataset).
-        return imputed_data.complete_data(dataset=0)

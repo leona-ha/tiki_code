@@ -22,9 +22,8 @@ from custom_models import PerUserTransformedTargetRegressor, SplitFeaturesTransf
 from sklearn.experimental import enable_iterative_imputer  # ✅ Must be imported first
 from sklearn.impute import IterativeImputer  # ✅ Now you can import it
 
-from custom_models import KerasFFNNRegressor,MiceForestImputer  # your new custom class
-
-
+from custom_models import KerasFFNNRegressor  # your new custom class
+from tensorflow.keras.callbacks import EarlyStopping
 
 import logging
 
@@ -63,8 +62,8 @@ class Config:
     TIME_COL = "sensor_block_end"
     LABEL_COL = "mean_na"
     STRATIFY_COL = "n_quest_stratify"
-    HOLDOUT_DATA_USAGE = "first_20"
 
+    
     # 3) Skewed Features
     SKEWED_FEATURES = [
         'age', 'hr_mean', 'hr_min', 'hr_max', 'hr_std', 'hr_zone_resting',
@@ -109,7 +108,7 @@ class Config:
     }
 
     # 6) Preprocessing Settings
-    IMPUTE_STRATEGY = "mice"
+    IMPUTE_STRATEGY = "knn"
     SCALER_STRATEGY = "minmax"
 
     # 7) Regression Model Settings
@@ -137,6 +136,8 @@ class Config:
     # 9) Holdout Evaluation
     HOLDOUT_EVAL_RATIO = 0.2
     HOLDOUT_ADAPT_RATIO = 0.8
+    HOLDOUT_DATA_USAGE = "last_20"
+
 
     # 10) Execution
     N_JOBS = 1
@@ -160,7 +161,7 @@ plain_ffnn_model = KerasFFNNRegressor(
             num_users=158,            # Irrelevant when use_embedding=False
             embedding_dim=32,         # Ignored when use_embedding is False
             hidden_units=(64, 32),
-            epochs=20,
+            epochs=15,
             batch_size=32,
             use_embedding=False,
             verbose=0
@@ -199,6 +200,19 @@ Regression_model_settings = {
     # 2. NON-SCALED MODELS (NO FEATURE SCALING) – Global Version
     #################################
     
+    "FFNN_with_Embeddings": (
+        Pipeline([
+            ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)),
+            ("keras_model", embedding_model)
+        ]),
+        {
+            "keras_model__embedding_dim": [8, 16, 32],
+            "keras_model__hidden_units": [(64, 32),(128, 64), (128, 64, 32)],
+            "keras_model__batch_size": [64],
+        })
+        }
+    
+"""    
     "LR": (
         Pipeline([
             ("model_LR", LinearRegression())
@@ -210,7 +224,8 @@ Regression_model_settings = {
             ("model_LRPS", LinearRegression())
         ]),
         {"model_LRPS__fit_intercept": [True, False]}
-    ),"""
+    ),
+
     "RF": (
         Pipeline([
             ("model_TTR", TransformedTargetRegressor(
@@ -219,7 +234,7 @@ Regression_model_settings = {
         ]),
         {
             "model_TTR__regressor__n_estimators": [100, 200, 300],
-            "model_TTR__regressor__max_depth": [10, 20, None],
+            "model_TTR__regressor__max_depth": [5,10, None],
             "model_TTR__regressor__min_samples_split": [2, 5, 10],
             "model_TTR__regressor__max_features": ['sqrt', 'log2']
         }
@@ -232,7 +247,7 @@ Regression_model_settings = {
         ]),
         {
             "model_TTR__regressor__n_estimators": [100, 200, 300],
-            "model_TTR__regressor__max_depth": [10, 20, None],
+            "model_TTR__regressor__max_depth": [5,10, None],
             "model_TTR__regressor__min_samples_split": [2, 5, 10],
             "model_TTR__regressor__max_features": ['sqrt', 'log2']
         }
@@ -262,14 +277,13 @@ Regression_model_settings = {
             "keras_model__regressor__learning_rate": [1e-3, 1e-4],
             "keras_model__regressor__dropout_rate": [0.25, 0.5],
         }
-    ),"""
+    ),
 
-    
     "MERF": (
         Pipeline([
             ("model_MERF", TransformedTargetRegressor(
                 regressor=MERFWrapperEmbed(
-                    gll_early_stop_threshold=0.01,
+                    gll_early_stop_threshold=0.025,
                     max_iterations=10,
                     rf__n_estimators=100
                 )
@@ -284,7 +298,7 @@ Regression_model_settings = {
         Pipeline([
             ("model_MERF", TransformedTargetRegressor(
                 regressor=MERFWrapperEmbed(
-                    gll_early_stop_threshold=0.01,
+                    gll_early_stop_threshold=0.025,
                     max_iterations=10,
                     rf__n_estimators=100
                 )
@@ -294,20 +308,7 @@ Regression_model_settings = {
             "model_MERF__regressor__max_iterations": [10,15],
             "model_MERF__regressor__rf__n_estimators": [50, 100]
         }
-    ),
-    "FFNN_with_Embeddings": (
-        Pipeline([
-            ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)),
-            ("keras_model", embedding_model)
-        ]),
-        {
-            "keras_model__embedding_dim": [16, 32, 64, 128],
-            "keras_model__hidden_units": [(64, 32), (128, 64), (128, 64, 32)],
-            "keras_model__batch_size": [32, 64],
-        }
-    )
-}
-
+    ),"""
 
 
 # Assign model settings to config
