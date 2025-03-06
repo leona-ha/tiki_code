@@ -17,12 +17,12 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.compose import TransformedTargetRegressor, ColumnTransformer
 from merf.merf import MERF
 from custom_models import MERFWrapperEmbed, GlobalInterceptModel, PerUserInterceptModel, PerUserLabelScaler
-from custom_models import PerUserTransformedTargetRegressor, SplitFeaturesTransformer, PerUserFeatureScaler,LMERWrapper
+from custom_models import PerUserTransformedTargetRegressor, SplitFeaturesTransformer, PerUserFeatureScaler
 # Enable experimental features in scikit-learn
 from sklearn.experimental import enable_iterative_imputer  # ✅ Must be imported first
 from sklearn.impute import IterativeImputer  # ✅ Now you can import it
 
-from custom_models import KerasFFNNRegressor  # your new custom class
+from custom_models import KerasFFNNRegressor,UnknownLabelEncoder  # your new custom class
 from tensorflow.keras.callbacks import EarlyStopping
 
 import logging
@@ -168,11 +168,6 @@ plain_ffnn_model = KerasFFNNRegressor(
 )
 
 
-inner_ffnn_pipeline = Pipeline([                  
-    ("split_features", SplitFeaturesTransformer(user_col=Config.USER_COL)), 
-    ("keras_model", embedding_model)
-])
-
 
 #################################
 # Define Custom Transformers
@@ -206,13 +201,11 @@ Regression_model_settings = {
             ("keras_model", embedding_model)
         ]),
         {
-            "keras_model__embedding_dim": [8, 16, 32],
+           "keras_model__embedding_dim": [8,16,32],
             "keras_model__hidden_units": [(64, 32),(128, 64), (128, 64, 32)],
             "keras_model__batch_size": [64],
-        })
-        }
-    
-"""    
+        }),
+
     "LR": (
         Pipeline([
             ("model_LR", LinearRegression())
@@ -228,28 +221,26 @@ Regression_model_settings = {
 
     "RF": (
         Pipeline([
-            ("model_TTR", TransformedTargetRegressor(
+            ("model_RF", TransformedTargetRegressor(
                 regressor=RandomForestRegressor(random_state=42)
             ))
         ]),
         {
-            "model_TTR__regressor__n_estimators": [100, 200, 300],
-            "model_TTR__regressor__max_depth": [5,10, None],
-            "model_TTR__regressor__min_samples_split": [2, 5, 10],
-            "model_TTR__regressor__max_features": ['sqrt', 'log2']
+            "model_RF__regressor__n_estimators": [50,100],
+            "model_RF__regressor__max_depth": [4,5],
+#            "model_RF__regressor__min_samples_split": [2, 5, 10],
         }
     ),
     "RF_with_PS": (
         Pipeline([
-            ("model_TTR", TransformedTargetRegressor(
+            ("model_RF_PS", TransformedTargetRegressor(
                 regressor=RandomForestRegressor(random_state=42)
             ))
         ]),
         {
-            "model_TTR__regressor__n_estimators": [100, 200, 300],
-            "model_TTR__regressor__max_depth": [5,10, None],
-            "model_TTR__regressor__min_samples_split": [2, 5, 10],
-            "model_TTR__regressor__max_features": ['sqrt', 'log2']
+            "model_RF_PS__regressor__n_estimators": [50,100],
+            "model_RF_PS__regressor__max_depth": [4,5],
+ #           "model_RF_PS__regressor__min_samples_split": [2, 5, 10]      
         }
     ),
     "FFNN": (
@@ -308,8 +299,9 @@ Regression_model_settings = {
             "model_MERF__regressor__max_iterations": [10,15],
             "model_MERF__regressor__rf__n_estimators": [50, 100]
         }
-    ),"""
-
+    ),
+    
+    }
 
 # Assign model settings to config
 Config.ANALYSIS["neg_affect_regression"]["MODEL_PIPEGRIDS"] = Regression_model_settings

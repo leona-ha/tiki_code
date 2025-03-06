@@ -11,20 +11,18 @@ import pandas as pd
 import numpy as np
 from sklearn.utils.validation import check_is_fitted
 from sklearn.impute import KNNImputer, SimpleImputer, IterativeImputer
-import statsmodels.api as sm
-
-
 
 from sklearn.compose import TransformedTargetRegressor
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import LabelEncoder
 
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense, Flatten, Embedding, Concatenate, Lambda, BatchNormalization, Dropout
+from tensorflow.keras.layers import Input, Dense, Flatten, Embedding, Concatenate, Lambda, BatchNormalization, LayerNormalization,Dropout, Layer
 from tensorflow.keras.models import Model
 from sklearn.base import BaseEstimator, RegressorMixin
 from tensorflow.keras import regularizers
 from tensorflow.keras.callbacks import EarlyStopping
+
 
 
 
@@ -491,157 +489,61 @@ class MERFWrapperEmbed(BaseEstimator, RegressorMixin):
 
 
 ##############################################################################
-# LMER Wrapper
-##############################################################################
-
-
-class LMERWrapper(BaseEstimator, RegressorMixin):
-    """
-    A scikit-learn wrapper for a linear mixed-effects regression model using statsmodels' MixedLM.
-    It automatically detects the grouping ('customer') column and (optionally) an intercept column,
-    renaming them as needed, and fits the model via MixedLM.from_formula.
-    
-    Parameters
-    ----------
-    re_formula : str, default="1"
-        The random effects formula. For example, "1" for random intercept only or "time" for a random slope on 'time'.
-    method : str, default="lbfgs"
-        The optimization method used by statsmodels.
-    """
-    def __init__(self, re_formula="1", method="lbfgs"):
-        self.re_formula = re_formula
-        self.method = method
-    def _ensure_unique_columns(self, df):
-        """
-        Ensures that all column names in the DataFrame are unique.
-        If duplicates are found, they are renamed by appending a suffix.
-        """
-        new_columns = []
-        seen = {}
-        for col in df.columns:
-            if col in seen:
-                seen[col] += 1
-                new_columns.append(f"{col}_{seen[col]}")
-            else:
-                seen[col] = 0
-                new_columns.append(col)
-        df.columns = new_columns
-        return df
-
-
-    def _detect_columns(self, X):
-        """
-        Detects the 'customer' (grouping) column and the intercept column.
-        
-        Returns
-        -------
-        cluster_col : str
-            Name of detected customer/group column.
-        intercept_col : str or None
-            Name of detected intercept column, or None if not found.
-        """
-        X = X.copy()
-        cluster_col = None
-        for col in X.columns:
-            if X[col].apply(lambda v: isinstance(v, str) and len(v) == 4 and any(c.isalpha() for c in v)).all():
-                cluster_col = col
-                break
-
-        intercept_col = None
-        for col in X.columns:
-            if np.all(X[col].astype(str) == "1"):
-                intercept_col = col
-                break
-
-        return cluster_col, intercept_col
-                    
-    def fit(self, X, y):
-        # Ensure X is a DataFrame.
-        if not isinstance(X, pd.DataFrame):
-            X = pd.DataFrame(X)
-        
-        # Drop duplicate columns in the original input and reset the index.
-        X = X.loc[:, ~X.columns.duplicated()].reset_index(drop=True)
-        
-        # Detect grouping and intercept columns.
-        cluster_col, intercept_col = self._detect_columns(X)
-        if cluster_col is None:
-            raise ValueError("No grouping (customer) column detected in input X.")
-        
-        # Rename detected columns.
-        X = X.rename(columns={cluster_col: "group"})
-        if intercept_col is not None:
-            X = X.rename(columns={intercept_col: "intercept"})
-        
-        # Prepare predictors: drop the group column.
-        predictors = X.drop(columns=["group"])
-        
-        # If no intercept column is provided, add a constant column.
-        # Use has_constant='skip' to avoid adding a duplicate constant.
-        if "intercept" not in predictors.columns and "const" not in predictors.columns:
-            predictors = sm.add_constant(predictors, has_constant='skip')
-        
-        # Drop any duplicate columns from predictors and reset the index.
-        predictors = predictors.loc[:, ~predictors.columns.duplicated()].reset_index(drop=True)
-        
-        # Combine predictors and response into one DataFrame.
-        data = predictors.copy()
-        data["y"] = y
-        # Add back the grouping variable.
-        data["group"] = X["group"]
-        
-        # Drop any duplicate columns in the combined data and reset the index.
-        data = data.loc[:, ~data.columns.duplicated()].reset_index(drop=True)
-        
-        # Build formula: use all predictors (exclude "y" and "group").
-        predictor_terms = " + ".join([col for col in data.columns if col not in ["y", "group"]])
-        formula = "y ~ " + predictor_terms
-        
-        # Debug: print final columns and index.
-        print("Final data columns for MixedLM:", data.columns.tolist())
-        print("Final data index (should be unique):", data.index.tolist())
-        
-        # Fit the MixedLM using from_formula.
-        self.model_ = sm.MixedLM.from_formula(formula, groups="group",
-                                              re_formula=self.re_formula, data=data)
-        self.result_ = self.model_.fit(method=self.method)
-        self.is_fitted_ = True
-        return self
-
-
-##############################################################################
 # Keras Split
 ##############################################################################
 
 
+class UnknownLabelEncoder:
+    def __init__(self):
+        self.classes_ = None
+        self.class_to_index = {}
+        self.unseen_mapping = {}
+        self.unseen_counter = None
+
+    def fit(self, y):
+        # Assume y is a Pandas Series or list of training user IDs.
+        unique = pd.Series(y).unique()
+        self.classes_ = list(unique)
+        self.class_to_index = {cls: i for i, cls in enumerate(self.classes_)}
+        # Start unseen indices right after training ones.
+        self.unseen_counter = len(self.classes_)
+        return self
+
+    def transform(self, y):
+        # y is a list or array of user IDs.
+        result = []
+        for val in y:
+            if val in self.class_to_index:
+                result.append(self.class_to_index[val])
+            else:
+                # If this unseen value is already assigned, use that.
+                if val in self.unseen_mapping:
+                    result.append(self.unseen_mapping[val])
+                else:
+                    # Otherwise, assign a new unique index.
+                    new_index = self.unseen_counter
+                    self.unseen_mapping[val] = new_index
+                    self.unseen_counter += 1
+                    result.append(new_index)
+        return np.array(result)
+
+
+
 class SplitFeaturesTransformer(BaseEstimator, TransformerMixin):
     """
-    Splits a DataFrame into a list for a Keras model that expects two inputs:
-      - sensor_input: numeric sensor features (all columns except the user column)
-      - user_input: encoded user IDs
-
-    If sensor_feature_cols is not provided, it will automatically select all columns
-    except the user column. This transformer uses a heuristic _detect_user_column
-    if the specified user_col is not actually found in X.columns.
+    Splits a DataFrame into sensor features and user IDs.
+    The user IDs are encoded using an UnknownLabelEncoder that assigns a special UNK index to unseen IDs.
     """
     def __init__(self, sensor_feature_cols=None, user_col=None):
-        self.sensor_feature_cols = sensor_feature_cols  # optional; if None, auto-detect
+        self.sensor_feature_cols = sensor_feature_cols  # If None, auto-detect all columns except user_col.
         self.user_col = user_col
-        self.encoder = LabelEncoder()
-        
+        self.encoder = UnknownLabelEncoder()  # Our custom encoder
+
     def _detect_user_column(self, X):
-        """
-        Attempts to detect candidate user columns using a heuristic:
-          - Look for a column whose values are all strings of exactly 4 characters
-            and containing at least one alphabetic character.
-        If multiple candidate columns are detected, it prints a warning and returns the first one.
-        """
-        # Find all columns matching the heuristic
         candidate_cols = [
             col for col in X.columns 
             if X[col].apply(lambda v: isinstance(v, str) and len(v) == 4 and any(c.isalpha() for c in v)).all()
         ]
-        
         if not candidate_cols:
             return None
         elif len(candidate_cols) > 1:
@@ -650,61 +552,76 @@ class SplitFeaturesTransformer(BaseEstimator, TransformerMixin):
         else:
             return candidate_cols[0]
 
-
     def _detect_sensor_columns(self, X):
-        """Return all columns except the user column (which might be numeric or string)."""
         return [col for col in X.columns if col != self.user_col]
 
     def fit(self, X, y=None):
         X = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
 
-        # 1) If the user_col isn't found in X.columns, try to detect it.
-        if self.user_col not in X.columns:
+        if self.user_col is None or self.user_col not in X.columns:
             detected = self._detect_user_column(X)
             if detected is None:
                 raise KeyError(f"[ERROR] User column '{self.user_col}' not found or detected.")
             self.user_col = detected
 
-        # 2) Now that we know the user column, detect or filter out sensor columns
         if self.sensor_feature_cols is None:
-            # auto-detect => all columns except the user column
             self.sensor_feature_cols = self._detect_sensor_columns(X)
         else:
-            # even if sensor_feature_cols is given, remove the user column if present
             self.sensor_feature_cols = [c for c in self.sensor_feature_cols if c != self.user_col]
 
+        # Store the final sensor columns for later use.
+        self.fitted_sensor_feature_cols_ = self.sensor_feature_cols.copy()
 
-        # 3) Fit the LabelEncoder on user column
         self.encoder.fit(X[self.user_col])
         return self
 
     def transform(self, X):
         X = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
-        
-        sensor_data = X[self.sensor_feature_cols].astype(float).values
+
+        # Use the stored sensor columns
+        sensor_data = X[self.fitted_sensor_feature_cols_].astype(float).values
         user_ids = self.encoder.transform(X[self.user_col])
         user_data = user_ids.reshape(-1, 1).astype(float)
-        
         X_merged = np.hstack([sensor_data, user_data]).astype(float)
-        
         return X_merged
+
 
 
 ##############################################################################
 # Keras Regressor
 ##############################################################################
 
+
+
+class SliceAndCastLayer(Layer):
+    """
+    A custom layer that slices the user IDs from column `sensor_feature_dim`
+    and casts them to int32.
+    """
+    def __init__(self, sensor_feature_dim, **kwargs):
+        super().__init__(**kwargs)
+        self.sensor_feature_dim = sensor_feature_dim
+
+    def call(self, inputs, training=None):
+        # The 'inputs' is shape [None, sensor_feature_dim + 1]
+        # We slice out inputs[:, sensor_feature_dim], then cast to int32
+        user_ids = tf.cast(inputs[:, self.sensor_feature_dim], tf.int32)
+        return user_ids
+
+
+
+
 class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
     def __init__(self,
                  sensor_feature_dim=None,
-                 num_users=158,
+                 num_users=None,  # Set to None to auto-detect from training data
                  embedding_dim=32,
                  hidden_units=(64, 32),
                  epochs=18,
                  batch_size=32,
                  learning_rate=1e-3,
                  dropout_rate=0.25,
-                 l2_reg=0.0,  # New parameter for L2 regularization
+                 l2_reg=0.0,
                  use_embedding=True,
                  verbose=0):
         self.sensor_feature_dim = sensor_feature_dim
@@ -715,7 +632,7 @@ class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.dropout_rate = dropout_rate
-        self.l2_reg = l2_reg  # Store new parameter
+        self.l2_reg = l2_reg
         self.use_embedding = use_embedding
         self.verbose = verbose
         self.model_ = None
@@ -724,11 +641,18 @@ class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
             self.embedding_dim = None
 
     def _build_model(self):
-
         if self.use_embedding:
             main_input = Input(shape=(self.sensor_feature_dim + 1,), name="merged_input")
-            sensor_data = Lambda(lambda x: x[:, :self.sensor_feature_dim])(main_input)
-            user_ids = Lambda(lambda x: tf.cast(x[:, self.sensor_feature_dim], tf.int32))(main_input)
+    
+            # sensor_data as before
+            sensor_data = Lambda(
+                lambda x: x[:, :self.sensor_feature_dim],
+                output_shape=(self.sensor_feature_dim,)
+            )(main_input)
+    
+            # user_ids with a custom layer
+            user_ids = SliceAndCastLayer(self.sensor_feature_dim)(main_input)
+    
             user_embedding = Embedding(input_dim=self.num_users,
                                        output_dim=self.embedding_dim,
                                        embeddings_initializer='he_normal')(user_ids)
@@ -737,13 +661,15 @@ class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
         else:
             main_input = Input(shape=(self.sensor_feature_dim,), name="sensor_input")
             x = main_input
-
-        # Build fully connected layers with L2 regularization
-        for units in self.hidden_units:
-            x = Dense(units, activation="relu", kernel_initializer='he_normal'
-                      )(x)
-            x = BatchNormalization()(x)
-            x = Dropout(self.dropout_rate)(x)
+    
+        # Build fully connected layers.
+        # Apply dropout only to the first two layers.
+        for i, units in enumerate(self.hidden_units):
+            x = Dense(units, activation="relu", kernel_initializer='he_normal')(x)
+            x = LayerNormalization()(x)
+            if i < 2:  # only add dropout for the first two layers
+                x = Dropout(self.dropout_rate)(x)
+                
         output = Dense(1, activation="linear")(x)
         model = Model(inputs=main_input, outputs=output)
         optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rate)
@@ -751,31 +677,55 @@ class KerasFFNNRegressor(BaseEstimator, RegressorMixin):
         return model
 
     def fit(self, X, y):
-        # If sensor_feature_dim is None, infer it from the data X
+        # Infer sensor_feature_dim if not provided
         if self.sensor_feature_dim is None:
-            self.sensor_feature_dim = X.shape[1] if not self.use_embedding else X.shape[1] - 1
+            self.sensor_feature_dim = X.shape[1] - 1 if self.use_embedding else X.shape[1]
+    
+        # Auto-detect num_users from the last column if needed
+        if self.num_users is None and self.use_embedding:
+            if isinstance(X, np.ndarray):
+                max_user_id = int(X[:, self.sensor_feature_dim].max())
+            else:
+                max_user_id = int(X.iloc[:, self.sensor_feature_dim].max())
+            self.num_users = max_user_id + 1
+            print(f"[DEBUG] Auto-detected num_users={self.num_users} from training data.")
     
         self.model_ = self._build_model()
-        
-        # Add EarlyStopping callback
-        early_stopping = EarlyStopping(
-            monitor='val_loss',
-            patience=5,
-#            min_delta=1e-4,
-            restore_best_weights=True
-        )
-        
-        # Fit the model, including the early_stopping callback
+        # Optionally, you can add early stopping here (uncomment if needed)
+        early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    
         self.history_ = self.model_.fit(
             X, y,
             epochs=self.epochs,
             batch_size=self.batch_size,
-#            validation_split=0.1,  # 10% of data used for validation
-#            callbacks=[early_stopping],
+            #validation_split=0.1,
+            #callbacks=[early_stopping],
             verbose=self.verbose
         )
         return self
 
-
     def predict(self, X):
         return self.model_.predict(X, verbose=self.verbose).ravel()
+
+    def get_config(self):
+        """
+        Return a dictionary of the hyperparameters.
+        This is needed for serialization.
+        """
+        return {
+            'sensor_feature_dim': self.sensor_feature_dim,
+            'num_users': self.num_users,
+            'embedding_dim': self.embedding_dim,
+            'hidden_units': self.hidden_units,
+            'epochs': self.epochs,
+            'batch_size': self.batch_size,
+            'learning_rate': self.learning_rate,
+            'dropout_rate': self.dropout_rate,
+            'l2_reg': self.l2_reg,
+            'use_embedding': self.use_embedding,
+            'verbose': self.verbose
+        }
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
