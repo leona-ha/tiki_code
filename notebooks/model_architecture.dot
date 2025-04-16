@@ -1,0 +1,37 @@
+digraph G {
+rankdir=TB;
+concentrate=true;
+dpi=200;
+splines=ortho;
+node [shape=record];
+23400712502576 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>merged_input</b> (InputLayer)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 58)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397940652016 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>slice_and_cast_layer_48</b> (SliceAndCastLayer)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 58)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None,)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397940653456 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>embedding_48</b> (Embedding)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None,)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 8)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397940653744 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>lambda_48</b> (Lambda)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 58)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 57)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397940494592 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>flatten_48</b> (Flatten)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 8)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 8)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397940496752 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>concatenate_48</b> (Concatenate)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>[(None, 57), (None, 8)]</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 65)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397959162272 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>dense_160</b> (Dense)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 65)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 128)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397959161024 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>layer_normalization_112</b> (LayerNormalization)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 128)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 128)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397950508768 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>dropout_96</b> (Dropout)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 128)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 128)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397932957760 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>dense_161</b> (Dense)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 128)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 64)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397950446464 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>layer_normalization_113</b> (LayerNormalization)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 64)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 64)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397950525888 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>dropout_97</b> (Dropout)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 64)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 64)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397959682128 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>dense_162</b> (Dense)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 64)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 32)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397959681648 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>layer_normalization_114</b> (LayerNormalization)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 32)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 32)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23397959681024 [label=<<table border="0" cellborder="1" bgcolor="black" cellpadding="10"><tr><td colspan="2" bgcolor="black"><font point-size="16" color="white"><b>dense_163</b> (Dense)</font></td></tr><tr><td bgcolor="white"><font point-size="14">Input shape: <b>(None, 32)</b></font></td><td bgcolor="white"><font point-size="14">Output shape: <b>(None, 1)</b></font></td></tr></table>>, fontname=Helvetica, border=0, margin=0];
+23400712502576 -> 23397940652016 [penwidth=2];
+23397940652016 -> 23397940653456 [penwidth=2];
+23400712502576 -> 23397940653744 [penwidth=2];
+23397940653456 -> 23397940494592 [penwidth=2];
+23397940653744 -> 23397940496752 [penwidth=2];
+23397940494592 -> 23397940496752 [penwidth=2];
+23397940496752 -> 23397959162272 [penwidth=2];
+23397959162272 -> 23397959161024 [penwidth=2];
+23397959161024 -> 23397950508768 [penwidth=2];
+23397950508768 -> 23397932957760 [penwidth=2];
+23397932957760 -> 23397950446464 [penwidth=2];
+23397950446464 -> 23397950525888 [penwidth=2];
+23397950525888 -> 23397959682128 [penwidth=2];
+23397959682128 -> 23397959681648 [penwidth=2];
+23397959681648 -> 23397959681024 [penwidth=2];
+}
