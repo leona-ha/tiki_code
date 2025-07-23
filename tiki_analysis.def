@@ -1,9 +1,35 @@
 Bootstrap: docker
-From: python:3.13
+From: python:3.13-slim
 
 %post
-    # Install Python packages based on your requirements
-    pip install --no-cache-dir -r requirements.txt
+    apt-get update
+    apt-get install -y \
+        gfortran \
+        build-essential \
+        cmake \
+        pkg-config \
+        libopenblas-dev \
+        liblapack-dev \
+        libblas-dev \
+        libffi-dev \
+        libssl-dev \
+        zlib1g-dev \
+        libjpeg-dev \
+        libpng-dev \
+        libfreetype6-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        git \
+        curl \
+        wget \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Upgrade pip and install wheel first
+    pip install --upgrade pip setuptools wheel
+
+
+    # Install Python packages from requirements file
+    pip install --no-cache-dir -r /opt/requirements.txt
 
 %environment
     export PYTHONPATH="/app/src:/app:${PYTHONPATH}"
@@ -30,7 +56,7 @@ From: python:3.13
     This container provides the Python environment for TIKI data analysis project.
     
     The container includes:
-    - Python 3.9 with scientific computing packages
+    - Python 3.13 with scientific computing packages
     - Jupyter Lab for interactive analysis
     - Data processing libraries (pandas, numpy, scikit-learn)
     - Visualization tools (matplotlib, seaborn, plotly)
@@ -64,5 +90,4 @@ From: python:3.13
     Project TIKI
 
 %files
-    # Copy requirements.txt if it exists
-    # requirements.txt /opt/requirements.txt
+    requirements.txt /opt/requirements.txt

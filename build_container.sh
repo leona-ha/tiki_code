@@ -18,11 +18,11 @@ if [ ! -f "$DEF_FILE" ]; then
     exit 1
 fi
 
-# Check if singularity is available
-if ! command -v singularity &> /dev/null; then
-    echo "Error: Singularity is not installed or not in PATH"
-    echo "Please load the singularity module first:"
-    echo "  module load singularity"
+# Check if apptainer is available
+if ! command -v apptainer &> /dev/null; then
+    echo "Error: Apptainer is not installed or not in PATH"
+    echo "Please load the apptainer module first:"
+    echo "  module load apptainer"
     exit 1
 fi
 
@@ -41,9 +41,9 @@ echo "This may take 10-15 minutes..."
 echo ""
 
 # Try building with fakeroot first, fallback to regular build
-if singularity build --fakeroot "$CONTAINER_NAME" "$DEF_FILE" 2>/dev/null; then
+if apptainer build --fakeroot "$CONTAINER_NAME" "$DEF_FILE" 2>/dev/null; then
     echo "✓ Container built successfully with fakeroot!"
-elif singularity build "$CONTAINER_NAME" "$DEF_FILE"; then
+elif apptainer build "$CONTAINER_NAME" "$DEF_FILE"; then
     echo "✓ Container built successfully!"
 else
     echo "✗ Build failed!"
@@ -64,11 +64,11 @@ echo "Container file: $CONTAINER_NAME"
 echo "Size: $(du -h $CONTAINER_NAME | cut -f1)"
 echo ""
 echo "Test the container:"
-echo "  singularity exec $CONTAINER_NAME python --version"
+echo "  apptainer exec $CONTAINER_NAME python --version"
 echo ""
 echo "Start Jupyter Lab:"
-echo "  singularity exec --bind \$PWD:/app --bind /sc-projects/sc-proj-cc15-preact/SP6/tiki_data:/data $CONTAINER_NAME \\"
+echo "  apptainer exec --bind \$PWD:/app --bind /sc-projects/sc-proj-cc15-preact/SP6/tiki_data:/data $CONTAINER_NAME \\"
 echo "    jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
 echo ""
 echo "Get help:"
-echo "  singularity help $CONTAINER_NAME"
+echo "  apptainer help $CONTAINER_NAME"
