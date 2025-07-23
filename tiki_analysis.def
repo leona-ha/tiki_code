@@ -1,0 +1,68 @@
+Bootstrap: docker
+From: python:3.13
+
+%post
+    # Install Python packages based on your requirements
+    pip install --no-cache-dir -r requirements.txt
+
+%environment
+    export PYTHONPATH="/app/src:/app:${PYTHONPATH}"
+    export LC_ALL=C
+    export LANG=C.UTF-8
+
+%runscript
+    echo "============================================"
+    echo "TIKI Data Analysis Singularity Container"
+    echo "============================================"
+    echo ""
+    echo "Available commands:"
+    echo "  jupyter lab    - Start Jupyter Lab"
+    echo "  python         - Run Python interpreter"
+    echo "  bash           - Interactive shell"
+    echo ""
+    echo "Usage examples:"
+    echo "  singularity exec tiki_analysis.sif jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
+    echo "  singularity exec tiki_analysis.sif python your_script.py"
+    echo "  singularity shell tiki_analysis.sif"
+    echo ""
+
+%help
+    This container provides the Python environment for TIKI data analysis project.
+    
+    The container includes:
+    - Python 3.9 with scientific computing packages
+    - Jupyter Lab for interactive analysis
+    - Data processing libraries (pandas, numpy, scikit-learn)
+    - Visualization tools (matplotlib, seaborn, plotly)
+    - Geospatial analysis tools (geopandas, folium)
+    - Big data processing (dask, modin)
+    
+    Data paths expected:
+    - /sc-projects/sc-proj-cc15-preact/SP6/tiki_data (main data directory)
+    - Bind your project directory to /app for access to notebooks and functions
+    
+    Usage examples:
+    
+    1. Start Jupyter Lab:
+       singularity exec --bind $PWD:/app --bind /sc-projects/sc-proj-cc15-preact/SP6/tiki_data:/data tiki_analysis.sif \
+       jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+    
+    2. Run a specific notebook:
+       singularity exec --bind $PWD:/app --bind /sc-projects/sc-proj-cc15-preact/SP6/tiki_data:/data tiki_analysis.sif \
+       jupyter nbconvert --to notebook --execute /app/notebooks/04_Passive_Preprocess.ipynb
+    
+    3. Interactive Python session:
+       singularity exec --bind $PWD:/app --bind /sc-projects/sc-proj-cc15-preact/SP6/tiki_data:/data tiki_analysis.sif python
+    
+    4. Interactive shell:
+       singularity shell --bind $PWD:/app --bind /sc-projects/sc-proj-cc15-preact/SP6/tiki_data:/data tiki_analysis.sif
+
+%labels
+    Author leona-ha
+    Version 1.0
+    Description TIKI Data Analysis Environment
+    Project TIKI
+
+%files
+    # Copy requirements.txt if it exists
+    # requirements.txt /opt/requirements.txt
