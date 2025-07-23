@@ -5,7 +5,7 @@
 
 CONTAINER="tiki_analysis.sif"
 PROJECT_DIR="/home/milu10/src/tiki_code"
-DATA_DIR="/sc-projects/sc-proj-cc15-preact/SP6/tiki_data"
+DATA_DIR="/sc-projects/sc-proj-cc15-preact/SP6"
 
 echo "============================================"
 echo "TIKI Analysis Container Usage Examples"

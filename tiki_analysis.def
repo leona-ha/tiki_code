@@ -91,3 +91,6 @@ From: python:3.13-slim
 
 %files
     requirements.txt /opt/requirements.txt
+    functions/ /app/functions
+    notebooks/ /app/notebooks
+    README.md /app/README.md
