@@ -8,10 +8,23 @@ logging.basicConfig(
 )
 
 
+def midnight_timestamp_to_berlin_tzoffset(ts):
+    # it's dst aware
+    if isinstance(ts, pd.Series):
+        return (ts + pd.Timedelta(hours=12)).dt.tz_convert("Europe/Berlin").map(
+            lambda x: x.utcoffset()
+        ).dt.total_seconds() / 60
+    elif isinstance(ts, pd.Timestamp):
+        return (ts + pd.Timedelta(hours=12)).tz_convert(
+            "Europe/Berlin"
+        ).utcoffset().total_seconds() / 60
+
+
 # %%
-def create_utcday_tzoffset_df(df):
+def create_utcday_tzoffset_df(df: pd.DataFrame) -> pd.DataFrame:
     """Create a DataFrame with inferred timezone offsets for each customer and day.
     It assumes the specific structure of the input DataFrame."""
+    # TODO might utilize something like ffill if the current implementation is too slow
     # %%
     # df = df.drop(columns=["stringValue", "doubleValue", "longValue", "booleanValue"]).copy()
     df = df[
@@ -120,7 +133,7 @@ def create_utcday_tzoffset_df(df):
 
     # %%
 
-    def adjust_dst_changes(df_tz, update_source=False, inplace=True):
+    def adjust_dst_changes(df_tz, update_source=False, inplace=False):
         """Adjust for DST changes in Berlin timezone."""
         # for the dst, assume there is the new timezone, in Berlin it's gonna be just one hour different
         # (1->2, and 2->1; instead of 2->3 & 3->2, as it shoud be) (since we convert at the 00:00 UTC )
@@ -148,7 +161,7 @@ def create_utcday_tzoffset_df(df):
 
     # it's done here, to make gps and activitydetailcreatedat multiple better
     # don't update the source here, as it's gonna be adjusted later
-    df_tz = adjust_dst_changes(df_tz)
+    df_tz = adjust_dst_changes(df_tz, inplace=True)
 
     # %%
     def infer_timezone_from_neighbors(
@@ -324,4 +337,132 @@ def create_utcday_tzoffset_df(df):
     df_tz = adjust_dst_changes(df_tz, update_source=True)
 
     # %%
+    df_tz["return_source"] = df_tz["return_source"].astype("category")
+
+    # return df_tz
+
+    df_tz = df_tz.rename(
+        columns={
+            "startTimestamp_day": "day",
+            "return_tz": "inferred_tzoffset",
+            "return_source": "inferred_tzoffset_source",
+        }
+    )
+    df_tz = df_tz[["customer", "day", "inferred_tzoffset", "inferred_tzoffset_source"]]
     return df_tz
+
+
+def merge_fill_tz(df, df_tz, day_col="quest_create_day", customer_col="customer"):
+    """
+    Fill missing timezone offsets by merging with timezone reference data,
+    forward-filling within customer groups, correcting DST mismatches, and
+    assuming Berlin timezone for remaining missing values.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with customer and day columns that need timezone offset filling
+    df_tz : pd.DataFrame
+        Reference DataFrame with inferred timezone offsets per customer and day
+        Must contain columns: ['customer', 'day', 'inferred_tzoffset', 'inferred_tzoffset_source']
+    day_col : str, default="quest_create_day"
+        Name of the day column in df to merge on
+    customer_col : str, default="customer"
+        Name of the customer column in df to merge on
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with filled timezone offsets and sources
+    """
+    assert (
+        set(["inferred_tzoffset", "inferred_tzoffset_source"]) & set(df.columns)
+        == set()
+    ), (
+        "Input df already contains 'inferred_tzoffset' or 'inferred_tzoffset_source' columns! "
+        "Drop them before calling this function"
+    )
+    # Select only needed columns from df_tz and merge
+    df_merged = pd.merge(
+        df,
+        df_tz,
+        left_on=[customer_col, day_col],
+        right_on=["customer", "day"],
+        how="left",
+        suffixes=("", ""),
+    )
+
+    df_merged = df_merged.drop(columns=["day"])
+
+    # Track which rows were initially missing
+    missing_tz = df_merged["inferred_tzoffset"].isna()
+    if missing_tz.sum() == 0:
+        logging.info("No missing timezone offsets to fill ✅.")
+        df_merged["inferred_tzoffset"] = df_merged["inferred_tzoffset"].astype("int")
+        df_merged["inferred_tzoffset_source"] = df_merged[
+            "inferred_tzoffset_source"
+        ].astype("category")
+        return df_merged
+
+    # Forward fill within customer groups
+    df_merged["inferred_tzoffset"] = df_merged.groupby(customer_col)[
+        "inferred_tzoffset"
+    ].ffill()
+
+    # Ensure source column is string type
+    df_merged["inferred_tzoffset_source"] = df_merged[
+        "inferred_tzoffset_source"
+    ].astype("string")
+
+    # Mark forward-filled entries
+    ffilled = missing_tz & df_merged["inferred_tzoffset"].notna()
+    df_merged.loc[ffilled, "inferred_tzoffset_source"] = "ffilled"
+
+    logging.info(f"Forward-filled timezone offsets: {ffilled.sum()}")
+
+    # Correct DST mismatches for forward-filled entries
+    if ffilled.sum() > 0:
+        # Determine expected timezone offset based on Berlin DST rules
+        expected_berlin_offset = midnight_timestamp_to_berlin_tzoffset(
+            df_merged.loc[ffilled, day_col]
+        )
+
+        # Identify mismatches
+        is_summer_expected = expected_berlin_offset == 120
+        is_winter_expected = expected_berlin_offset == 60
+
+        needs_summer_correction = is_summer_expected & (
+            df_merged.loc[ffilled, "inferred_tzoffset"] == 60
+        )
+        needs_winter_correction = is_winter_expected & (
+            df_merged.loc[ffilled, "inferred_tzoffset"] == 120
+        )
+
+        # Apply corrections
+        ffilled_idx = df_merged.index[ffilled]
+        df_merged.loc[ffilled_idx[needs_summer_correction], "inferred_tzoffset"] = 120
+        df_merged.loc[ffilled_idx[needs_winter_correction], "inferred_tzoffset"] = 60
+
+        logging.info(f"Corrected to summer time (120 min): {needs_summer_correction.sum()}")
+        logging.info(f"Corrected to winter time (60 min): {needs_winter_correction.sum()}")
+
+    # Handle still-missing values by assuming Berlin timezone
+    still_missing = df_merged["inferred_tzoffset"].isna()
+
+    if still_missing.sum() > 0:
+        logging.info(f"Assumed Berlin timezone offsets: {still_missing.sum()}")
+        df_merged.loc[still_missing, "inferred_tzoffset"] = (
+            midnight_timestamp_to_berlin_tzoffset(df_merged.loc[still_missing, day_col])
+        )
+        df_merged.loc[still_missing, "inferred_tzoffset_source"] = "assumed_berlin"
+
+    df_merged["inferred_tzoffset"] = df_merged["inferred_tzoffset"].astype("int")
+    df_merged["inferred_tzoffset_source"] = df_merged[
+        "inferred_tzoffset_source"
+    ].astype("category")
+    # Final assertion
+    assert df_merged["inferred_tzoffset"].isna().sum() == 0, (
+        "Failed to fill all timezone offsets!"
+    )
+
+    return df_merged
